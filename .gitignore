@@ -1,0 +1,13 @@
+# Secrets — never commit (contains a live API token)
+.env
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# Build artifacts / tooling output
+dist/
+build/
+*.egg-info/
+.coverage

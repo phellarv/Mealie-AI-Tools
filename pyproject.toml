@@ -1,0 +1,109 @@
+[project]
+name = "mealie-tool"
+version = "0.5.0"
+description = "Generate schema.org recipes with Google Gemini and publish them (with an AI-generated image) to Mealie, in a selectable language."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Per-Arne Hellarvik", email = "duckboot@gmail.com" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
+# Upper caps keep even a lock-free install (e.g. plain pip) off breaking upstream
+# majors; install.sh additionally pins to uv.lock via --constraints (#26). The
+# google-genai floor tracks the locked/proven version, not an older release.
+dependencies = [
+    "google-genai>=2.10,<3",
+    "requests>=2.31,<3",
+    "python-dotenv>=1.0.0,<2",
+    "pydantic>=2.0,<3",
+    "textual>=1.0,<9",
+]
+
+[project.scripts]
+mealie-tool = "mealie_tool:main"
+mealie-tui = "mealie_tui:main"
+
+[project.urls]
+Repository = "https://git.duckboot.net/Duckboot/Mealie-AI-Tools"
+Issues = "https://git.duckboot.net/Duckboot/Mealie-AI-Tools/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pylint>=4,<5",
+    # Test-only: parses .github/workflows/release.yaml in test_publish_github.py
+    # to extract the changelog-extraction step's awk script for a behavioural test.
+    "pyyaml>=6,<7",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.pylint.main]
+# Judge the code against the project's minimum Python (see requires-python
+# above) rather than whatever interpreter happens to run pylint, so it neither
+# suggests newer-only syntax nor flags 3.10-valid code.
+py-version = "3.10"
+
+[tool.pylint.basic]
+# Deliberately lowercase, reassignable module-level globals (mutated via
+# `global`): _active_lang (i18n.set_lang), _insecure_url_warned
+# (mealie_tool.mealie_base_url, a once-per-process warn flag), and _debug
+# (config.set_debug, the process-wide debug flag, #69). snake_case is correct
+# for these, so whitelist the names instead of turning off invalid-name.
+good-names-rgxs = "^(_active_lang|_insecure_url_warned|_debug)$"
+
+[tool.pylint.format]
+# mealie_tui.py aggregates every Textual screen of a single interactive app, so
+# it is legitimately large. Set the module-size limit as a deliberate policy
+# (with headroom) rather than letting the accidental 1000-line default act as a
+# de-facto architecture forcing-function (#44). Split on cohesion, not lines.
+max-module-lines = 1200
+
+[tool.pylint.design]
+# choose_category / choose_cuisine_tag / _main are guard-clause / CLI-dispatch
+# functions that legitimately sit one over the default of 6 return statements.
+# The other design limits (max-locals, max-statements) stay at their defaults so
+# genuinely oversized functions are still flagged.
+max-returns = 8
+# _main's flat "if args.<mode>: return run_<mode>_mode(args)" dispatch grows by
+# one branch each time a new flag-mode is added (search, retag, merge-tags,
+# fill-images, #72); a small bump keeps that readable guard-clause shape
+# instead of forcing an indirection layer purely to dodge the default of 12.
+max-branches = 14
+
+[tool.pylint."messages control"]
+# Keep this list short: real code-quality signals in the source modules stay
+# enabled. Framework/test-only false positives (pytest fixture injection,
+# Textual test doubles, etc.) are relaxed per-file at the top of each test_*.py,
+# not here, so those checks remain live for i18n.py / mealie_tool.py /
+# mealie_tui.py.
+#
+# global-statement: i18n.py intentionally keeps the active language in a module
+# global with a set_lang() setter — a deliberate, documented singleton, not the
+# accidental global mutation this check targets.
+disable = [
+    "global-statement",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Top-level single-file modules plus the language catalogs shipped in the wheel.
+# lang/*.json land next to the modules, where i18n.py locates them via
+# Path(__file__).parent / "lang".
+[tool.hatch.build.targets.wheel]
+include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "retag.py", "merge_tags.py", "fill_images.py", "lang/*.json"]

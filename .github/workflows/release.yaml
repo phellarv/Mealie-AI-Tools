@@ -1,0 +1,40 @@
+name: Release
+# Runs ONLY on github.com (guarded). Final build+smoke check of the published
+# source, then creates the GitHub Release. The full 3.10-3.13 test matrix lives
+# on Gitea; green Gitea CI before tagging is the real quality gate.
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: write
+jobs:
+  release:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build wheel + sdist
+        run: uv build
+      - name: Smoke-test the built wheel
+        run: |
+          python3 -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/mealie-tool --help
+      - name: Extract changelog section for this tag
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v tag="$ver" '
+            $0 ~ "^## \\[" tag "\\]" {f=1; next}
+            f && /^## \[/ {exit}
+            f && /^\[[^][]*\]: / {exit}
+            f {print}
+          ' CHANGELOG.md > NOTES.md
+          test -s NOTES.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file NOTES.md dist/*
