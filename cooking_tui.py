@@ -19,7 +19,7 @@ from textual.widgets import (
 )
 
 import i18n
-from mealie_tool import ingredient_texts, instruction_texts
+from recipe_core import ingredient_texts, instruction_texts
 
 
 class CookStepsScreen(Screen):

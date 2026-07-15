@@ -5,9 +5,7 @@ generates a food photo with Gemini and uploads it. CLI only (no TUI).
 
 The pure ``is_missing_image`` predicate carries the selection logic and is
 unit-tested in isolation; ``run_fill_images_mode`` (below) wires it to the
-Mealie API, the Gemini image call and the CLI confirmation. ``mealie_tool`` is
-imported lazily inside functions to break the dispatch import cycle (mealie_tool
-imports run_fill_images_mode at top level), exactly as retag.py / merge_tags.py.
+Mealie API, the Gemini image call and the CLI confirmation.
 """
 from __future__ import annotations
 
@@ -22,6 +20,9 @@ from config import (
 from gemini import build_image_prompt, generate_image
 from mealie_api import (
     mealie_get_recipe, mealie_list_recipes, mealie_upload_image,
+)
+from recipe_core import (
+    _cleanup_files, confirm, ingredient_texts, slugify, with_retries,
 )
 
 # Values Mealie stores in a recipe summary's ``image`` field when there is no
@@ -55,12 +56,6 @@ def _fill_one(ctx: _FillCtx, summary: dict) -> bool:
     MealieToolError (a Gemini failure or a Mealie upload rejection) log a warning
     and return False so the batch continues. Returns True on a successful upload.
     """
-    # Lazy imports break the mealie_tool <-> fill_images dispatch cycle
-    # (mirrors retag.py / merge_tags.py).
-    # pylint: disable-next=import-outside-toplevel,cyclic-import
-    from mealie_tool import (
-        _cleanup_files, ingredient_texts, slugify, with_retries,
-    )
     name = summary.get("name", "")
     slug = summary.get("slug") or slugify(name)
     try:
@@ -69,7 +64,7 @@ def _fill_one(ctx: _FillCtx, summary: dict) -> bool:
         print(i18n.t("fill_images.generating", name=name), file=sys.stderr)
         # Never clobber a file this run did not create: if something already sits
         # at the slug stem, generate under a distinct "-ai" base (mirrors
-        # mealie_tool._publish). generate_image picks the extension from the
+        # publish._publish). generate_image picks the extension from the
         # response mime, so the final path is not known up front.
         image_base = (f"{slug}-ai"
                       if any(ctx.output_dir.glob(f"{slug}.*"))
@@ -106,14 +101,12 @@ def _confirm_batch(args, count: int) -> int | None:
     without --yes, 0 for an interactive decline. Mirrors the guard in
     mealie_tool._main / run_merge_tags_mode, but returns the code so the
     three-way outcome (proceed / decline / non-tty) survives."""
-    # pylint: disable-next=import-outside-toplevel,cyclic-import
-    import mealie_tool as mtool
     if args.yes:
         return None
     if not sys.stdin.isatty():
         print(i18n.t("fill_images.noninteractive"), file=sys.stderr)
         return 1
-    if not mtool.confirm(i18n.t("fill_images.confirm", count=count)):
+    if not confirm(i18n.t("fill_images.confirm", count=count)):
         print(i18n.t("fill_images.aborted"))
         return 0
     return None

@@ -5,8 +5,7 @@ retags every recipe carrying the losing tag with the kept one and deletes the
 loser. The pure helpers (find_similar_pairs, recipe_tags_after_merge,
 _tag_recipe_map) carry the logic and are unit-tested in isolation;
 run_merge_tags_mode (added later) wires them to the Mealie API and the CLI
-picker. mealie_tool is imported lazily inside functions to break the dispatch
-import cycle.
+picker.
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from mealie_api import (
     MealieApiError, mealie_delete_tag, mealie_get_tags, mealie_list_recipes,
     mealie_set_recipe_tags,
 )
+from recipe_core import confirm
 
 
 @dataclass
@@ -136,9 +136,6 @@ def _print_merge_plan(plans: list) -> None:
 def run_merge_tags_mode(args) -> int:
     """Merge-tags entry: suggest similar tag pairs, keep one per pair, retag the
     loser's recipes and delete the loser. Returns the process exit code."""
-    # Lazy import breaks the mealie_tool <-> merge_tags dispatch cycle.
-    # pylint: disable-next=import-outside-toplevel,cyclic-import
-    import mealie_tool as mtool
     base = mealie_base_url()
     token = require_env("MEALIE_API_TOKEN")
 
@@ -171,7 +168,7 @@ def run_merge_tags_mode(args) -> int:
         if not sys.stdin.isatty():
             print(i18n.t("merge.noninteractive"), file=sys.stderr)
             return 1
-        if not mtool.confirm(i18n.t("merge.confirm", count=len(plans))):
+        if not confirm(i18n.t("merge.confirm", count=len(plans))):
             print(i18n.t("merge.aborted"))
             return 0
 

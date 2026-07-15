@@ -26,7 +26,7 @@ from config import MealieToolError, require_env
 # GEMINI_IMAGE_MODEL set only in .env -- which loads after this module is
 # imported -- still takes effect (#23).
 DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
-DEFAULT_IMAGE_MODEL = "gemini-3-pro-image-preview"
+DEFAULT_IMAGE_MODEL = "gemini-3-1-flash-image"
 DEFAULT_ASPECT = "4:3"
 
 # Request timeouts (whole seconds) for the Gemini SDK calls. Without an explicit
@@ -200,6 +200,36 @@ def generate_recipes(model: str, request_text: str, examples: list[dict],
     if not recipes:
         raise MealieToolError(i18n.t("gemini.no_recipes"))
     return [r.model_dump() for r in recipes]
+
+
+def transform_recipe(model: str, source_context: str, mode: str,
+                     constraint: str | None) -> dict:
+    """Transform an existing recipe into the GeneratedRecipe shape.
+
+    `mode` is "adapt" (rewrite for a dietary/other constraint), "remix"
+    (repurpose into a new dish), or "translate" (faithful translation into the
+    language named by `constraint`). `constraint` is the diet (adapt), the
+    optional target hint (remix), or the target language code (translate).
+    Returns the validated subset as a dict."""
+    if mode == "adapt":
+        system_key, temperature = "prompt.adapt_system", 0.5
+        instruction = i18n.t("prompt.adapt_instruction", constraint=constraint or "")
+    elif mode == "remix":
+        system_key, temperature = "prompt.remix_system", 0.85
+        instruction = i18n.t("prompt.remix_instruction", hint=constraint or "")
+    elif mode == "translate":
+        system_key, temperature = "prompt.translate_system", 0.2
+        instruction = i18n.t("prompt.translate_instruction", lang=constraint or "")
+    else:  # defensive; run_transform_mode only ever passes adapt/remix/translate
+        raise MealieToolError(i18n.t("gemini.no_content"))
+    contents = f"{source_context}\n\n{instruction}"
+    text = _gemini_generate_text(model, contents, GeneratedRecipe, temperature,
+                                 system_key=system_key)
+    try:
+        recipe = GeneratedRecipe.model_validate_json(text)
+    except Exception as exc:  # noqa: BLE001 -- pydantic.ValidationError et al.
+        raise MealieToolError(i18n.t("gemini.schema_mismatch", error=exc)) from exc
+    return recipe.model_dump()
 
 
 def _available_models_hint(client, requested: str) -> str:

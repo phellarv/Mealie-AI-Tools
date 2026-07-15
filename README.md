@@ -1,8 +1,13 @@
 # Mealie-AI-Tools
 
 Personal recipe collection for import into [Mealie](https://mealie.io), plus
-tooling to generate recipes and publish them automatically. The tools target
-whatever Mealie instance is configured via `MEALIE_URL` in `.env`.
+three focused CLI tools that generate, maintain and publish recipes
+automatically: `mealie-generator` (create a new recipe from scratch),
+`mealie-companion` (clean up recipes already in Mealie), and `mealie-tool`
+(search recipes, and turn an existing one into a new adapted/remixed/
+translated recipe) — plus `mealie-tui`, a terminal UI over the same pipeline.
+The tools target whatever Mealie instance is configured via `MEALIE_URL` in
+`.env`.
 
 Generated recipes use the schema.org Recipe JSON-LD format, with kebab-case
 filenames (e.g. `enchiladas-verdes.json`). Content defaults to Norwegian; the
@@ -30,37 +35,15 @@ description, and the tools show the same reminder when generating.
   POSIX/busybox shell. On a minimal **Alpine** image, install it first
   (`apk add bash`); busybox-ash cannot run `./install.sh`.
 - **`curl` and `jq`** (`jq` >= 1.6) — only for the manual `upload-to-mealie.sh`
-  uploader (a source-repository helper, see below). The installed `mealie-tool`
-  / `mealie-tui` are pure Python and need neither.
+  uploader (a source-repository helper, see below). The installed
+  `mealie-generator` / `mealie-companion` / `mealie-tool` / `mealie-tui` are
+  pure Python and need neither.
 
 The installed runtime itself shells out to nothing — it's portable pure Python.
 These prerequisites are install-time (and, for `curl`/`jq`, manual-upload-time)
 only.
 
-## `mealie-tool` — generate and publish in one command
-
-`mealie_tool.py` runs the whole loop:
-
-1. Generate a Norwegian schema.org recipe with **Google Gemini**.
-2. Save it as `<slug>.json` (schema.org Recipe JSON-LD).
-3. Upload it to Mealie (`POST /api/recipes/create/html-or-json`).
-4. Generate a fitting food photo with **Gemini's image model**.
-5. Upload that image directly to the created recipe
-   (`PUT /api/recipes/{slug}/image`).
-6. Remove the cached `<slug>.json` and image once they are safely in Mealie
-   (keep them with `--keep-files`).
-
-After a successful upload, the tool offers (best-effort, skipped under
-`--yes`) to add ingredients from the created recipe to a chosen Mealie
-shopping list. Adding is opt-in — nothing is selected by default, so you pick
-exactly which ingredients to add; and if a list named like the active
-language's default (`Handleliste`, or `Shopping list` in English) exists, it
-is offered as the default list. Separately, `--search "<query>"` skips
-generation entirely: it searches Mealie's recipes and presents the matches
-together with their Mealie links (#13), and lets you pick one to add its
-ingredients to a shopping list the same way.
-
-### Setup
+## Setup
 
 The tools are installed with [uv](https://docs.astral.sh/uv/) as an isolated
 package — once installed, the checkout is no longer needed at runtime:
@@ -69,15 +52,17 @@ package — once installed, the checkout is no longer needed at runtime:
 ./install.sh
 ```
 
-This runs `uv tool install .` (an isolated copy with `mealie-tool` / `mealie-tui`
-on your `PATH`), pinned to the committed `uv.lock` via install-time constraints
-so the install is reproducible — re-run after a `uv lock` bump to move versions
-forward. On first install it also seeds a config file at
-`~/.config/Mealie-AI-Tools/.env` from [`.env.example`](.env.example) for you to
-fill in. It is safe to re-run; `./install.sh --uninstall` removes the tool, and
-`--help` lists the options. If the commands aren't found afterwards, run
-`uv tool update-shell` to put uv's tool bin dir on your `PATH`. For development
-you can still run `uv run mealie-tool` from the checkout without installing.
+This runs `uv tool install .` (an isolated copy with `mealie-generator` /
+`mealie-companion` / `mealie-tool` / `mealie-tui` on your `PATH`), pinned to
+the committed `uv.lock` via install-time constraints so the install is
+reproducible — re-run after a `uv lock` bump to move versions forward. On
+first install it also seeds a config file at `~/.config/Mealie-AI-Tools/.env`
+from [`.env.example`](.env.example) for you to fill in. It is safe to re-run;
+`./install.sh --uninstall` removes the tools, and `--help` lists the options.
+If the commands aren't found afterwards, run `uv tool update-shell` to put
+uv's tool bin dir on your `PATH`. For development you can still run
+`uv run mealie-generator` (or `mealie-companion` / `mealie-tool` / `mealie-tui`)
+from the checkout without installing.
 
 > **Supported install path.** The isolated `uv tool install` above (or `uv run`
 > from a checkout) is the only supported way to install these tools. The package
@@ -102,7 +87,7 @@ Keys:
 - `GEMINI_TEXT_MODEL` — optional override of the text model (default
   `gemini-2.5-flash`); overridden per run by `--model`.
 - `GEMINI_IMAGE_MODEL` — optional override of the image model (default
-  `gemini-3-pro-image-preview`).
+  `gemini-3-1-flash-image`).
 - `GEMINI_TIMEOUT` — optional per-request timeout for the Gemini calls, in whole
   seconds (defaults: 120 for text, 300 for image). Guards against a stalled
   connection hanging the tool; raise it on slow links or for large images.
@@ -113,24 +98,24 @@ Keys:
   so it is refused unless you opt in (e.g. a trusted LAN-only Mealie).
 - `MEALIE_DEBUG` — set to `1`/`true`/`yes`/`on` to turn on verbose error detail
   (underlying cause, failing URL, HTTP status and response body) appended to
-  error messages, in both `mealie-tool` and `mealie-tui`. `mealie-tool` also has
-  a `--debug` flag, resolved as `--debug` > `MEALIE_DEBUG` > off (`mealie-tui`
-  has no flag — it reads `MEALIE_DEBUG` only). Off by default; the API token is
-  never included.
+  error messages, in `mealie-generator`, `mealie-companion`, `mealie-tool` and
+  `mealie-tui`. The three CLI commands also have a `--debug` flag, resolved as
+  `--debug` > `MEALIE_DEBUG` > off (`mealie-tui` has no flag — it reads
+  `MEALIE_DEBUG` only). Off by default; the API token is never included.
 
 Both recipe text and the food photo are generated directly against the Gemini
 API — no external tools involved.
 
 ### Language
 
-Both the program's interface and the language the recipe is generated in are
-selectable. The active language is chosen as `--lang` > `MEALIE_LANG` (in
-`.env` / the environment) > `no` (the default), so nothing changes unless you
-opt in:
+Both each command's interface and the language recipes are generated or
+translated in are selectable. The active language is chosen as `--lang` >
+`MEALIE_LANG` (in `.env` / the environment) > `no` (the default), so nothing
+changes unless you opt in:
 
 ```bash
-mealie-tool --lang en "creamy fish soup"      # English UI + English recipe
-mealie-tool "kremet fiskesuppe med reker"     # Norwegian (default)
+mealie-generator --lang en "creamy fish soup"      # English UI + English recipe
+mealie-generator "kremet fiskesuppe med reker"     # Norwegian (default)
 ```
 
 Each language is a small JSON catalog under `lang/` (`lang/no.json` is the
@@ -138,23 +123,23 @@ reference; `lang/en.json` is the English translation). **Adding a language** is
 just dropping a `lang/<code>.json` with the same keys — no code change. The
 test suite enforces that every catalog carries the same keys as `no.json`.
 
-### Usage
+## `mealie-generator` — generate a new recipe from scratch
 
-Once installed (see Setup) you can run it from any directory:
+`mealie_generator.py` runs the whole create-and-publish loop:
 
-```bash
-# Free text
-mealie-tool "rask kremet tomatsuppe med basilikum"
+1. Generate a schema.org recipe (Norwegian by default; selectable, see
+   [Language](#language)) with **Google Gemini**, from free text and/or
+   `--cuisine` / `--ingredients` / `--servings`.
+2. Save it as `<slug>.json` (schema.org Recipe JSON-LD).
+3. Upload it to Mealie (`POST /api/recipes/create/html-or-json`).
+4. Generate a fitting food photo with **Gemini's image model**.
+5. Upload that image directly to the created recipe
+   (`PUT /api/recipes/{slug}/image`).
+6. Remove the cached `<slug>.json` and image once they are safely in Mealie
+   (keep them with `--keep-files`).
 
-# By cuisine and/or ingredients
-mealie-tool --cuisine Italiensk --ingredients "kylling, sitron, hvitløk"
-
-# Force a name, and only generate + save the JSON (no upload, no image)
-mealie-tool --cuisine Thai --name "Grønn curry" --dry-run
-```
-
-By default the tool asks for confirmation before uploading to Mealie, then lets
-you pick the recipe's category from Mealie's existing list (defaulting to a
+By default it asks for confirmation before uploading to Mealie, then lets you
+pick the recipe's category from Mealie's existing list (defaulting to a
 case-insensitive match with Gemini's suggestion, so accepting the default
 reuses Mealie's existing category instead of creating a near-duplicate). It
 does the same for the cuisine, resolving it against Mealie's existing tags and
@@ -165,7 +150,27 @@ recipe after upload via the Mealie API (`PATCH /api/recipes/{slug}`), not
 through the local JSON file. Only existing Mealie tools are attached — it never
 creates new ones. It refuses to upload if a recipe with the same name already
 exists. All of these interactive picks (category, cuisine, tools) are skipped
-under `--yes`.
+under `--yes`. After a successful upload it also offers (best-effort, skipped
+under `--yes`) to add ingredients from the created recipe to a chosen Mealie
+shopping list — opt-in, nothing selected by default, with a list named like
+the active language's default (`Handleliste` / `Shopping list`) preselected
+when it exists. This same publish pipeline (organizer picks, tool attach,
+shopping-list offer) is shared with the `--adapt`/`--remix`/`--translate`
+modes of `mealie-tool` (see below); `mealie-tui` implements the equivalent flow
+independently in its own screens (it does not import `publish.py`).
+
+### Usage
+
+```bash
+# Free text
+mealie-generator "rask kremet tomatsuppe med basilikum"
+
+# By cuisine and/or ingredients
+mealie-generator --cuisine Italiensk --ingredients "kylling, sitron, hvitløk"
+
+# Force a name, and only generate + save the JSON (no upload, no image)
+mealie-generator --cuisine Thai --name "Grønn curry" --dry-run
+```
 
 ### Options
 
@@ -174,54 +179,84 @@ under `--yes`.
 | `text` (args)    | Free-text description of the recipe                                    |
 | `--cuisine`      | Cuisine, e.g. `Italiensk`, `Thai`, `Meksikansk`                        |
 | `--ingredients`  | Comma-separated ingredients to include                                 |
-| `--name`         | Force a specific recipe name (also drives the slug/filename)           |
 | `--servings`     | Number of servings, e.g. `4`                                           |
-| `--lang`         | UI and recipe language, e.g. `no`, `en` (overrides `MEALIE_LANG`)      |
+| `--name`         | Force a specific recipe name (also drives the slug/filename)           |
 | `--model`        | Gemini text model (default `gemini-2.5-flash`; or `GEMINI_TEXT_MODEL`) |
 | `--aspect`       | Image aspect ratio (default `4:3`)                                     |
+| `--no-image`     | Skip image generation and upload                                       |
 | `--output-dir`   | Where to read style examples and write files (default: cwd)            |
+| `--force`        | Overwrite a pre-existing local `<slug>.json` and upload even if a recipe with the same name already exists |
+| `--keep-files`   | Keep the cached `<slug>.json` and image after upload (default: remove) |
+| `--lang`         | UI and recipe language, e.g. `no`, `en` (overrides `MEALIE_LANG`)      |
 | `--env-file`     | Path to the `.env` with credentials (overrides the config dir / `./.env`) |
-| `--search QUERY` | Search recipes, show matches with links, and optionally add a match's ingredients to a shopping list |
+| `--dry-run`      | Generate and save the JSON only; don't touch Mealie or generate images |
+| `--yes` / `-y`   | Skip the upload confirmation prompt                                    |
+| `--debug`        | Append verbose error detail (cause, URL, status, response body) to error messages; overrides `MEALIE_DEBUG` |
+
+## `mealie-companion` — clean up existing recipes
+
+`mealie_companion.py` groups six maintenance flag-modes over recipes already in
+Mealie: `--audit`, `--retag`, `--merge-tags`, `--fill-images`, `--describe` and
+`--complete`. Pick exactly **one** per run — none is on by default, and
+combining two is a usage error.
+
+```bash
+mealie-companion --audit
+```
+
+### Options
+
+| Flag             | Description                                                            |
+|------------------|------------------------------------------------------------------------|
+| `--audit`        | Scan recipes in Mealie and print a worst-first worklist of under-filled ones with the fix-mode for each gap (read-only) |
 | `--retag`        | Walk recipes in Mealie and add tags to under-tagged ones (retag mode; ignores the recipe text) |
 | `--min-tags N`   | In `--retag`: process recipes with fewer than N tags (default `5`)     |
 | `--max-tags N`   | In `--retag`: cap a recipe's total tags (default `8`; must be ≥ `--min-tags`) |
-| `--limit N`      | In `--retag`/`--fill-images`: process at most N recipes this run       |
-| `--batch-size N` | In `--retag`: recipes per Gemini call (default `10`)                   |
 | `--merge-tags`   | Find and merge very similar tags in Mealie; retag the loser's recipes to the keeper, then delete the loser (destructive) |
 | `--similarity F` | In `--merge-tags`: similarity threshold `0-1` for suggested pairs (default `0.8`) |
-| `--fill-images`  | Walk recipes in Mealie and generate + upload an AI photo for each one that has no image (fill-images mode; CLI only) |
-| `--no-image`     | Skip image generation and upload                                       |
-| `--dry-run`      | Generate and save the JSON only; don't touch Mealie or generate images |
-| `--yes` / `-y`   | Skip the upload confirmation prompt                                    |
-| `--force`        | Overwrite a pre-existing local `<slug>.json` and upload even if a recipe with the same name already exists |
-| `--keep-files`   | Keep the cached `<slug>.json` and image after upload (default: remove) |
+| `--fill-images`  | Walk recipes in Mealie and generate + upload an AI photo for each one that has no image (fill-images mode) |
+| `--describe`     | Walk recipes in Mealie and generate/expand the Description for under-described ones (describe mode) |
+| `--min-text N`   | In `--describe`: threshold + floor in sentences (absent: only empty descriptions are filled) |
+| `--max-text N`   | In `--describe`: upper bound in sentences for the generated Description (default `4`) |
+| `--complete`     | Walk recipes in Mealie and fill in missing prep/cook times and a numeric serving count (complete mode) |
+| `--limit N`      | In `--audit`/`--retag`/`--fill-images`/`--describe`/`--complete`: process at most N recipes this run |
+| `--batch-size N` | In `--retag`/`--describe`/`--complete`: recipes per Gemini call (default `10`) |
+| `--model`        | Gemini text model used by `--retag`/`--describe`/`--complete` (default `gemini-2.5-flash`; or `GEMINI_TEXT_MODEL`) |
+| `--aspect`       | Image aspect ratio used by `--fill-images` (default `4:3`)             |
+| `--output-dir`   | Where `--fill-images` writes generated photos (default: cwd)           |
+| `--keep-files`   | Keep `--fill-images`' generated photo after upload (default: remove)   |
+| `--lang`         | UI language, e.g. `no`, `en` (overrides `MEALIE_LANG`)                 |
+| `--env-file`     | Path to the `.env` with credentials (overrides the config dir / `./.env`) |
+| `--dry-run`      | Preview the plan only; write or generate nothing                       |
+| `--yes` / `-y`   | Skip the confirmation prompt                                            |
 | `--debug`        | Append verbose error detail (cause, URL, status, response body) to error messages; overrides `MEALIE_DEBUG` |
 
 ### Retag — fill in missing tags
 
-`mealie-tool --retag` walks the recipes already in Mealie and, for those with
-fewer than `--min-tags` tags (default 5), asks Gemini for fitting tags —
+`mealie-companion --retag` walks the recipes already in Mealie and, for those
+with fewer than `--min-tags` tags (default 5), asks Gemini for fitting tags —
 preferring Mealie's existing tags so the list stays tidy. Existing-tag matches
 are applied automatically; genuinely new tags are collected across the whole
 run and you confirm them **once** (ticking which to keep) before anything is
 written. Tags are only ever added, never removed, so re-running is safe.
 
-    mealie-tool --retag --dry-run              # preview the plan, write nothing
-    mealie-tool --retag --limit 10             # cautiously do 10 recipes
-    mealie-tool --retag --min-tags 3 --yes     # top up to 3+, keep all new tags
+    mealie-companion --retag --dry-run              # preview the plan, write nothing
+    mealie-companion --retag --limit 10             # cautiously do 10 recipes
+    mealie-companion --retag --min-tags 3 --yes     # top up to 3+, keep all new tags
 
 `--yes` keeps every proposed new tag without prompting; `--dry-run` only prints
 the plan.
 
 ### Merge similar tags
 
-`mealie-tool --merge-tags` finds very similar tags (e.g. `Vegetar` / `Vegetarisk`),
-lets you keep one per pair, retags every recipe carrying the losing tag with the
-kept one, then **deletes** the losing tag. Pairs are suggested by fuzzy match
-(`--similarity`, default `0.8`); the more-used tag is the default keeper.
+`mealie-companion --merge-tags` finds very similar tags (e.g. `Vegetar` /
+`Vegetarisk`), lets you keep one per pair, retags every recipe carrying the
+losing tag with the kept one, then **deletes** the losing tag. Pairs are
+suggested by fuzzy match (`--similarity`, default `0.8`); the more-used tag is
+the default keeper.
 
-    mealie-tool --merge-tags --dry-run     # preview suggestions + plan, no writes
-    mealie-tool --merge-tags               # review each pair, confirm, apply
+    mealie-companion --merge-tags --dry-run     # preview suggestions + plan, no writes
+    mealie-companion --merge-tags               # review each pair, confirm, apply
 
 It is destructive (it deletes tags): nothing is written under `--dry-run`, there
 is a single confirmation before applying, and a non-interactive run without
@@ -230,18 +265,139 @@ without prompting.
 
 ### Fill in missing images
 
-`mealie-tool --fill-images` walks the recipes already in Mealie, finds the
-ones that have **no image**, and generates + uploads an AI food photo for each
-(CLI only, not the TUI). It scans, previews the image-less recipes, and asks
-**once** before generating the whole batch.
+`mealie-companion --fill-images` walks the recipes already in Mealie, finds the
+ones that have **no image**, and generates + uploads an AI food photo for each.
+It scans, previews the image-less recipes, and asks **once** before generating
+the whole batch.
 
-    mealie-tool --fill-images --dry-run           # preview the plan, generate nothing
-    mealie-tool --fill-images --limit 5           # cautiously do 5 recipes
-    mealie-tool --fill-images --aspect 1:1 --yes  # square images, no prompts
+    mealie-companion --fill-images --dry-run           # preview the plan, generate nothing
+    mealie-companion --fill-images --limit 5           # cautiously do 5 recipes
+    mealie-companion --fill-images --aspect 1:1 --yes  # square images, no prompts
 
 `--dry-run` only previews the plan; a non-interactive run without `--yes`
 aborts. Detection is conservative — only a clearly-empty `image` field counts
 as missing — so an existing photo is never regenerated or overwritten.
+
+### Fill in missing or short descriptions
+
+`mealie-companion --describe` walks the recipes already in Mealie and
+generates a warm, grounded Description for those that have none — and, with
+`--min-text N`, also expands any with fewer than N sentences, building on the
+existing text. Length is in sentences: `--min-text` is the threshold **and**
+floor (absent: only empty descriptions are filled), `--max-text` (default `4`)
+is the upper bound. It scans, previews the under-described recipes, and asks
+**once** before generating the whole batch.
+
+    mealie-companion --describe --dry-run              # preview the plan, write nothing
+    mealie-companion --describe --limit 5              # cautiously do 5 recipes
+    mealie-companion --describe --min-text 2 --yes     # also expand short ones, no prompts
+
+`--dry-run` only previews the plan; a non-interactive run without `--yes`
+aborts. Descriptions are AI-generated (a run-time notice says so), and a
+description that already meets the threshold is never overwritten.
+
+### Complete missing times & servings
+
+`mealie-companion --complete` walks the recipes already in Mealie and fills in
+missing **prep/cook times** and a **numeric serving count** for those that
+lack them. Times and servings are estimated by Gemini from the recipe's
+technique and ingredient quantities — they are advisory (a run-time notice
+says so), and an existing time or serving count is never overwritten. It
+scans, previews the recipes to complete, and asks **once** before the batch.
+
+    mealie-companion --complete --dry-run     # preview the plan, write nothing
+    mealie-companion --complete --limit 5     # cautiously do 5 recipes
+    mealie-companion --complete --yes         # no prompts
+
+`--dry-run` only previews; a non-interactive run without `--yes` aborts.
+
+### Audit — find under-filled recipes
+
+`mealie-companion --audit` scans every recipe already in Mealie and scores it
+on eight deterministic completeness dimensions (image, tags, category, times,
+yield, description, instruction depth, nutrition) — no Gemini call, no writes.
+It prints a summary tally per gap and a worst-first worklist of the recipes
+that are missing something, each gap tagged with the flag-mode that fixes it
+(e.g. `--fill-images` for a missing image, `--retag` for too few tags).
+
+    mealie-companion --audit
+    mealie-companion --audit --min-tags 3 --limit 20
+
+`--min-tags` and `--limit` apply as in `--retag`. `--audit` is read-only and
+cannot be combined with the other mode flags.
+
+## `mealie-tool` — search recipes, and transform an existing one
+
+`mealie_tool.py` covers what's left after generation and cleanup moved out:
+`--search`, and the transform modes `--adapt` / `--remix` / `--translate`.
+Pick exactly one of `--search` or a transform flag per run.
+
+```bash
+mealie-tool --search "taco soup"
+```
+
+### Search recipes
+
+`--search "<query>"` searches Mealie's recipes and presents the matches
+together with their Mealie links (#13), and lets you pick one to add its
+(selected) ingredients to a shopping list (#14). Presenting results without
+picking — or finding no matches — is still a success.
+
+### Options
+
+| Flag               | Description                                                            |
+|---------------------|------------------------------------------------------------------------|
+| `--search QUERY`   | Search recipes, show matches with links, and optionally add a match's ingredients to a shopping list |
+| `--adapt SLUG`     | Adapt an existing Mealie recipe (by slug) to a diet, building a new recipe via the publish pipeline; requires `--diet` |
+| `--diet`           | The diet/constraint for `--adapt`, e.g. `vegansk`, `glutenfri`, `uten nøtter` |
+| `--remix SLUG`     | Create a new dish from the leftovers of an existing Mealie recipe (by slug), building a new recipe via the publish pipeline |
+| `--into`           | Optional target hint for `--remix`, e.g. `suppe`                       |
+| `--translate SLUG` | Translate an existing Mealie recipe (by slug) into the active `--lang`, building a new recipe via the publish pipeline; requires an explicit `--lang`/`MEALIE_LANG` |
+| `--name`           | Force a specific recipe name for the new (adapted/remixed/translated) recipe |
+| `--model`          | Gemini text model (default `gemini-2.5-flash`; or `GEMINI_TEXT_MODEL`) |
+| `--aspect`         | Image aspect ratio (default `4:3`)                                     |
+| `--no-image`       | Skip image generation and upload                                       |
+| `--output-dir`     | Where to write files (default: cwd)                                    |
+| `--force`          | Overwrite a pre-existing local `<slug>.json` and upload even if a recipe with the same name already exists |
+| `--keep-files`     | Keep the cached `<slug>.json` and image after upload (default: remove) |
+| `--lang`           | UI language, e.g. `no`, `en` (overrides `MEALIE_LANG`); the explicit target language required by `--translate` |
+| `--env-file`       | Path to the `.env` with credentials (overrides the config dir / `./.env`) |
+| `--dry-run`        | Generate and save the JSON only; don't touch Mealie or generate images |
+| `--yes` / `-y`     | Skip the upload confirmation prompt                                    |
+| `--debug`          | Append verbose error detail (cause, URL, status, response body) to error messages; overrides `MEALIE_DEBUG` |
+
+### Adapt or remix an existing recipe
+
+`mealie-tool --adapt <slug> --diet "<constraint>"` fetches an existing Mealie
+recipe and asks Gemini to rewrite it as a **new** recipe for a given diet or
+constraint, then runs it through the same generate → publish pipeline as
+`mealie-generator` (organizer picks, tool attach, shopping-list offer
+included). The source recipe is never modified; the new recipe's description
+carries a provenance line naming the source and a caveat that the adaptation
+is not a guarantee (especially for allergens). `mealie-tool --remix <slug>
+[--into "<hint>"]` instead repurposes the source recipe's leftovers into a
+different dish, with an optional hint at the target dish.
+
+    mealie-tool --adapt kjottdeig-lasagne --diet "vegansk"
+    mealie-tool --remix helstekt-kylling --into "suppe"
+
+`--adapt`, `--remix` and `--translate` cannot be combined with each other or
+with `--search`; `--adapt` requires `--diet`. `--dry-run`, `--yes`, `--force`,
+`--keep-files`, `--name`, `--output-dir` and `--aspect` all apply as in the
+generate flow.
+
+### Translate a recipe
+
+`mealie-tool --translate <slug> --lang <code>` fetches an existing Mealie recipe
+and creates a **new** recipe that is a faithful translation of it into the target
+language — only the language changes; quantities, units, times and servings stay
+as they are, and the source recipe is untouched. The target language is the
+active `--lang`, which **must** be set explicitly (translating to the default
+would just duplicate the recipe). The new recipe's description carries a
+"Translated from …" provenance line.
+
+    mealie-tool --translate kremet-fiskesuppe --lang en
+    mealie-tool --translate enchiladas-verdes --lang de --yes
 
 ## `mealie-tui` — interactive terminal UI
 
@@ -265,10 +421,9 @@ applied to the recipe after upload via `PATCH /api/recipes/{slug}`, never
 written into the local JSON and never creating new tools — before upload →
 **Last opp til Mealie**, and watch the publish steps stream live. Only the chosen recipe is
 saved to disk (and, like the CLI, removed after a successful upload). It reuses
-`mealie_tool`'s functions and the same config discovery (`~/.config/Mealie-AI-Tools/.env`,
-falling back to `./.env`), so it works from anywhere once installed. A "force"
-checkbox on the preview screen uploads even when the name already exists in
-Mealie.
+the same config discovery (`~/.config/Mealie-AI-Tools/.env`, falling back to
+`./.env`), so it works from anywhere once installed. A "force" checkbox on the
+preview screen uploads even when the name already exists in Mealie.
 
 The preview screen also has a shopping-ingredient checklist and a Mealie
 shopping-list dropdown (#14): nothing is ticked by default, so tick exactly
@@ -302,16 +457,16 @@ shown in the footer (`u` upload, `f` toggle force, `Esc` back).
 > repository at `git.duckboot.net` and is **not** part of the published GitHub
 > snapshot.
 
-`upload-to-mealie.sh` is a **dev-only** manual helper (the maintained upload
-path is `mealie-tool` above); use it only to publish a recipe JSON-LD file you
-wrote by hand:
+`upload-to-mealie.sh` is a **dev-only** manual helper (the maintained
+generate-and-publish path is `mealie-generator` above); use it only to publish
+a recipe JSON-LD file you wrote by hand:
 
 ```bash
 ./upload-to-mealie.sh [--env-file PATH] [--force] <file.json> [more.json ...]
 ```
 
 It reads `MEALIE_URL` / `MEALIE_API_TOKEN` from a `.env` using the **same
-precedence as `mealie-tool`** (`--env-file` > `$MEALIE_CONFIG_DIR/.env` >
+precedence as the mealie-* commands** (`--env-file` > `$MEALIE_CONFIG_DIR/.env` >
 `~/.config/Mealie-AI-Tools/.env` > `./.env`; process-env wins), parses that
 `.env` rather than sourcing it, and passes the token to curl via a `--config`
 pipe (so it never appears in `ps`). It skips a recipe whose name already exists

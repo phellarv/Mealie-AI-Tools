@@ -43,8 +43,9 @@ from cooking_tui import CookIngredientsScreen
 # The leading-underscore helpers below (_default_shopping_list, _unique_sorted_names,
 # _cleanup_files, _prescan_flag) are deliberate SHARED internal API across the
 # CLI/TUI modules, not module-private -- treat a signature change as cross-module.
-# These modules import from mealie_tool (not from this module), so there is no
-# import cycle and everything can be imported at top level.
+# cli_pickers and recipe_core are leaf modules (neither imports mealie_tool or
+# mealie_tui), so importing from them here creates no cycle and everything can
+# be imported at top level.
 from cli_pickers import _default_shopping_list, _unique_sorted_names
 from config import (
     MealieToolError, error_detail, load_config, mealie_base_url, require_env,
@@ -54,7 +55,7 @@ from gemini import (
     DEFAULT_ASPECT, build_image_prompt, generate_image, generate_recipes,
     resolve_text_model,
 )
-from mealie_tool import (
+from recipe_core import (
     _cleanup_files, _prescan_flag, ingredient_texts, load_style_examples,
     merge_keyword, remove_keyword, slugify, to_jsonld, validate_jsonld,
     with_retries,

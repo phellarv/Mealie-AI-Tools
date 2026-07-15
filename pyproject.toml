@@ -1,6 +1,6 @@
 [project]
 name = "mealie-tool"
-version = "0.5.0"
+version = "1.0.0"
 description = "Generate schema.org recipes with Google Gemini and publish them (with an AI-generated image) to Mealie, in a selectable language."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -33,6 +33,8 @@ dependencies = [
 [project.scripts]
 mealie-tool = "mealie_tool:main"
 mealie-tui = "mealie_tui:main"
+mealie-generator = "mealie_generator:main"
+mealie-companion = "mealie_companion:main"
 
 [project.urls]
 Repository = "https://git.duckboot.net/Duckboot/Mealie-AI-Tools"
@@ -73,16 +75,13 @@ good-names-rgxs = "^(_active_lang|_insecure_url_warned|_debug)$"
 max-module-lines = 1200
 
 [tool.pylint.design]
-# choose_category / choose_cuisine_tag / _main are guard-clause / CLI-dispatch
-# functions that legitimately sit one over the default of 6 return statements.
-# The other design limits (max-locals, max-statements) stay at their defaults so
-# genuinely oversized functions are still flagged.
-max-returns = 8
-# _main's flat "if args.<mode>: return run_<mode>_mode(args)" dispatch grows by
-# one branch each time a new flag-mode is added (search, retag, merge-tags,
-# fill-images, #72); a small bump keeps that readable guard-clause shape
-# instead of forcing an indirection layer purely to dodge the default of 12.
-max-branches = 14
+# choose_category / choose_cuisine_tag (cli_pickers.py) are guard-clause pickers
+# that legitimately sit one over the default of 6 return statements. The other
+# design limits (max-branches, max-bool-expr, max-locals, max-statements) stay at
+# their defaults so genuinely oversized functions are still flagged. (Before the
+# #88 CLI split, _main and _reject_mode_conflicts needed higher branch/bool-expr
+# limits; the split into per-tool entry points removed that need.)
+max-returns = 7
 
 [tool.pylint."messages control"]
 # Keep this list short: real code-quality signals in the source modules stay
@@ -106,4 +105,4 @@ build-backend = "hatchling.build"
 # lang/*.json land next to the modules, where i18n.py locates them via
 # Path(__file__).parent / "lang".
 [tool.hatch.build.targets.wheel]
-include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "retag.py", "merge_tags.py", "fill_images.py", "lang/*.json"]
+include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "recipe_core.py", "publish.py", "retag.py", "merge_tags.py", "fill_images.py", "describe.py", "audit.py", "transform.py", "complete.py", "cli_common.py", "mealie_generator.py", "mealie_companion.py", "lang/*.json"]

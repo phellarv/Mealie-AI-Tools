@@ -330,6 +330,40 @@ def mealie_set_recipe_tags(base: str, token: str, slug: str,
             resp.status_code, resp.text, getattr(resp, "url", None))
 
 
+def mealie_set_recipe_description(base: str, token: str, slug: str,
+                                  description: str) -> None:
+    """Set a recipe's description via a partial PATCH (mirrors
+    ``mealie_set_recipe_tags``). Raises MealieResponseError on rejection."""
+    with _wrap_errors():
+        resp = requests.patch(
+            f"{base}/api/recipes/{slug}",
+            headers={**_mealie_headers(token), "Content-Type": "application/json"},
+            json={"description": description},
+            timeout=60,
+        )
+    if resp.status_code != 200:
+        raise MealieResponseError(
+            f"Mealie description update failed ({resp.status_code}): {resp.text}",
+            resp.status_code, resp.text, getattr(resp, "url", None))
+
+
+def mealie_update_recipe(base: str, token: str, slug: str, fields: dict) -> None:
+    """Partial-PATCH arbitrary recipe fields (mirrors ``mealie_set_recipe_tags``).
+    A general write used by the curation modes (--complete, and later --categorize
+    / --enrich-instructions). Raises MealieResponseError on rejection."""
+    with _wrap_errors():
+        resp = requests.patch(
+            f"{base}/api/recipes/{slug}",
+            headers={**_mealie_headers(token), "Content-Type": "application/json"},
+            json=fields,
+            timeout=60,
+        )
+    if resp.status_code != 200:
+        raise MealieResponseError(
+            f"Mealie recipe update failed ({resp.status_code}): {resp.text}",
+            resp.status_code, resp.text, getattr(resp, "url", None))
+
+
 def mealie_upload_image(base: str, token: str, slug: str, image_path: Path) -> None:
     """Upload the image as the recipe image (PUT /api/recipes/{slug}/image).
 

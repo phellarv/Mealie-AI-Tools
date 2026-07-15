@@ -10,8 +10,7 @@ removed, so a run is idempotent.
 The pure helpers (is_thin, categorise, collect_new_tags, final_tags,
 parse_batch_response) carry the logic and are unit-tested in isolation;
 run_retag_mode (below) wires them to the Mealie API, the Gemini call and the
-CLI pickers. mealie_tool is imported lazily inside functions to break the
-dispatch import cycle (mealie_tool imports run_retag_mode at top level).
+CLI pickers.
 """
 from __future__ import annotations
 
@@ -28,6 +27,7 @@ from mealie_api import (
     MealieApiError, MealieResponseError, mealie_create_tag, mealie_get_recipe,
     mealie_get_tags, mealie_list_recipes, mealie_set_recipe_tags,
 )
+from recipe_core import ingredient_texts, slugify
 
 
 class RecipeTags(BaseModel):
@@ -184,9 +184,6 @@ def _retag_prompt(batch: list, vocabulary: list, min_tags: int,
                   max_tags: int) -> str:
     """Assemble the batched retag prompt: instructions, the existing vocabulary,
     then one block per recipe (index, name, category, ingredients)."""
-    # Lazy import breaks the mealie_tool <-> retag dispatch cycle.
-    # pylint: disable-next=import-outside-toplevel,cyclic-import
-    from mealie_tool import ingredient_texts
     parts = [i18n.t("prompt.retag_instructions", min=min_tags, max=max_tags),
              i18n.t("prompt.retag_vocabulary", tags=", ".join(vocabulary) or "-")]
     for i, recipe in enumerate(batch, 1):
@@ -243,8 +240,6 @@ def _get_or_create_tag(ctx: _RetagCtx, name: str, index: dict):
     existing tag. Returns the tag dict, or None (with a warning) if it can
     neither be created nor found, so one tag never fails the whole recipe (#59).
     A resolved tag is folded into `index` for reuse across recipes."""
-    # pylint: disable-next=import-outside-toplevel
-    from mealie_tool import slugify
     try:
         tag = mealie_create_tag(ctx.base, ctx.token, name)
     except MealieResponseError:
@@ -275,8 +270,6 @@ def _resolve_tag_refs(ctx: _RetagCtx, names: list, index: dict) -> list:
     name or slug (or slugified name) and otherwise creating it. `index` is keyed
     by name and slug and is mutated as tags are created/found, so a tag is
     created at most once per run. Unresolvable tags are dropped (best-effort)."""
-    # pylint: disable-next=import-outside-toplevel
-    from mealie_tool import slugify
     refs: list = []
     for name in names:
         tag = index.get(name.strip().lower()) or index.get(slugify(name))
