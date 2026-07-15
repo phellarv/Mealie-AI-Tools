@@ -51,7 +51,7 @@ class MealieResponseError(MealieApiError):
 
 class MealieConnectionError(MealieApiError):
     """The request to Mealie failed before a usable response (network/transport;
-    connection reset, timeout, DNS). Retryable -- see mealie_tool.with_retries."""
+    connection reset, timeout, DNS). Retryable -- see recipe_core.with_retries."""
 
 
 @contextmanager
@@ -82,17 +82,41 @@ def _mealie_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _require_status(resp, op: str, allowed: tuple = (200,)) -> None:
+    """Raise MealieResponseError (carrying status/body/url) unless resp's status
+    is in `allowed`. Centralises the write helpers' manual non-2xx check so the
+    error shape lives in one place instead of nine copies (#103)."""
+    if resp.status_code not in allowed:
+        raise MealieResponseError(
+            f"Mealie {op} failed ({resp.status_code}): {resp.text}",
+            resp.status_code, resp.text, getattr(resp, "url", None))
+
+
 def mealie_find_existing(base: str, token: str, name: str) -> list[str]:
-    """Return names of recipes whose name matches (case-insensitive) `name`."""
-    with _wrap_errors():
-        resp = requests.get(
-            f"{base}/api/recipes",
-            headers=_mealie_headers(token),
-            params={"search": name, "perPage": 50},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        items = resp.json().get("items", [])
+    """Return names of recipes whose name matches (case-insensitive) `name`.
+
+    Paginated (like ``mealie_list_recipes`` / ``mealie_get_tags``): a single
+    capped page could push the exact-name match past the first page on a large
+    instance, so the duplicate guard would miss it and Mealie would silently
+    append ``-1``/``-2`` to the slug (#102)."""
+    items: list[dict] = []
+    page = 1
+    while True:
+        with _wrap_errors():
+            resp = requests.get(
+                f"{base}/api/recipes",
+                headers=_mealie_headers(token),
+                params={"search": name, "page": page, "perPage": 100},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        batch = data.get("items", [])
+        items.extend(batch)
+        total_pages = data.get("total_pages") or data.get("totalPages") or 1
+        if not batch or page >= total_pages:
+            break
+        page += 1
     target = name.strip().lower()
     return [it.get("name", "") for it in items if it.get("name", "").strip().lower() == target]
 
@@ -205,10 +229,7 @@ def mealie_add_shopping_item(base: str, token: str, list_id: str, note: str,
             json={"shoppingListId": list_id, "note": note, "quantity": quantity},
             timeout=30,
         )
-    if resp.status_code != 201:
-        raise MealieResponseError(
-            f"Mealie add shopping item failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
+    _require_status(resp, "add shopping item", (201,))
 
 
 def mealie_group_slug(base: str, token: str) -> str:
@@ -225,7 +246,10 @@ def mealie_group_slug(base: str, token: str) -> str:
         )
         resp.raise_for_status()
         slug = resp.json().get("slug")
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError, AttributeError, TypeError):
+        # AttributeError/TypeError: a JSON body that is not a dict (e.g. a list)
+        # would make .get() raise; the link is cosmetic, so fall back to "home"
+        # rather than breaking an upload that already succeeded (#100).
         return "home"
     return slug if isinstance(slug, str) and slug else "home"
 
@@ -239,11 +263,9 @@ def mealie_create_recipe(base: str, token: str, jsonld_str: str) -> str:
             json={"includeTags": True, "includeCategories": True, "data": jsonld_str},
             timeout=60,
         )
-    if resp.status_code != 201:
-        raise MealieResponseError(
-            f"Mealie create failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
-    return resp.json()  # bare slug string
+    _require_status(resp, "create", (201,))
+    with _wrap_errors():  # a 2xx with a non-JSON body -> MealieApiError, not raw (#100)
+        return resp.json()  # bare slug string
 
 
 def mealie_set_recipe_tools(base: str, token: str, slug: str,
@@ -261,10 +283,7 @@ def mealie_set_recipe_tools(base: str, token: str, slug: str,
                             for t in tools]},
             timeout=60,
         )
-    if resp.status_code != 200:
-        raise MealieResponseError(
-            f"Mealie tools update failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
+    _require_status(resp, "tools update")
 
 
 def mealie_list_recipes(base: str, token: str) -> list[dict]:
@@ -303,11 +322,9 @@ def mealie_create_tag(base: str, token: str, name: str) -> dict:
             json={"name": name},
             timeout=30,
         )
-    if resp.status_code not in (200, 201):
-        raise MealieResponseError(
-            f"Mealie create tag failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
-    return resp.json()
+    _require_status(resp, "create tag", (200, 201))
+    with _wrap_errors():  # a 2xx with a non-JSON body -> MealieApiError, not raw (#100)
+        return resp.json()
 
 
 def mealie_set_recipe_tags(base: str, token: str, slug: str,
@@ -324,10 +341,7 @@ def mealie_set_recipe_tags(base: str, token: str, slug: str,
                            for t in tags]},
             timeout=60,
         )
-    if resp.status_code != 200:
-        raise MealieResponseError(
-            f"Mealie tags update failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
+    _require_status(resp, "tags update")
 
 
 def mealie_set_recipe_description(base: str, token: str, slug: str,
@@ -341,10 +355,7 @@ def mealie_set_recipe_description(base: str, token: str, slug: str,
             json={"description": description},
             timeout=60,
         )
-    if resp.status_code != 200:
-        raise MealieResponseError(
-            f"Mealie description update failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
+    _require_status(resp, "description update")
 
 
 def mealie_update_recipe(base: str, token: str, slug: str, fields: dict) -> None:
@@ -358,10 +369,7 @@ def mealie_update_recipe(base: str, token: str, slug: str, fields: dict) -> None
             json=fields,
             timeout=60,
         )
-    if resp.status_code != 200:
-        raise MealieResponseError(
-            f"Mealie recipe update failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
+    _require_status(resp, "recipe update")
 
 
 def mealie_upload_image(base: str, token: str, slug: str, image_path: Path) -> None:
@@ -372,19 +380,23 @@ def mealie_upload_image(base: str, token: str, slug: str, image_path: Path) -> N
     """
     ext = image_path.suffix.lstrip(".").lower() or "png"
     mime = _MIME_BY_EXT.get(ext, f"image/{ext}")
-    with _wrap_errors():
+    # open() must sit outside _wrap_errors (which only translates requests
+    # errors); a file-read OSError is turned into a MealieApiError so the
+    # best-effort image step in publish.py catches it instead of a raw
+    # OSError escaping after the recipe was already created (#100).
+    try:
         with open(image_path, "rb") as handle:
-            resp = requests.put(
-                f"{base}/api/recipes/{slug}/image",
-                headers=_mealie_headers(token),
-                files={"image": (image_path.name, handle, mime)},
-                data={"extension": ext},
-                timeout=120,
-            )
-    if resp.status_code != 200:
-        raise MealieResponseError(
-            f"Mealie image upload failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
+            with _wrap_errors():
+                resp = requests.put(
+                    f"{base}/api/recipes/{slug}/image",
+                    headers=_mealie_headers(token),
+                    files={"image": (image_path.name, handle, mime)},
+                    data={"extension": ext},
+                    timeout=120,
+                )
+    except OSError as exc:
+        raise MealieApiError(f"Could not read image file {image_path}: {exc}") from exc
+    _require_status(resp, "image upload")
 
 
 def mealie_delete_tag(base: str, token: str, tag_id: str) -> None:
@@ -397,7 +409,4 @@ def mealie_delete_tag(base: str, token: str, tag_id: str) -> None:
             headers=_mealie_headers(token),
             timeout=30,
         )
-    if resp.status_code not in (200, 204):
-        raise MealieResponseError(
-            f"Mealie delete tag failed ({resp.status_code}): {resp.text}",
-            resp.status_code, resp.text, getattr(resp, "url", None))
+    _require_status(resp, "delete tag", (200, 204))

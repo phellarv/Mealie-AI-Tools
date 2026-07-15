@@ -160,7 +160,7 @@ def choose_category(base: str, token: str, current: str) -> str:
         return default
     if not answer:
         return default
-    if answer.isdigit():
+    if re.fullmatch(r"\d+", answer):
         idx = int(answer)
         if idx == 0:
             return default
@@ -208,7 +208,7 @@ def choose_cuisine_tag(base: str, token: str, current: str) -> str:
         return default
     if not answer:
         return default
-    if answer.isdigit():
+    if re.fullmatch(r"\d+", answer):
         idx = int(answer)
         if idx == 0:
             return default
@@ -347,7 +347,7 @@ def choose_shopping_list(base: str, token: str) -> dict | None:
         answer = input(prompt).strip()
     except EOFError:
         return default
-    if answer.isdigit() and 1 <= int(answer) <= len(lists):
+    if re.fullmatch(r"\d+", answer) and 1 <= int(answer) <= len(lists):
         return lists[int(answer) - 1]
     if answer:  # non-empty but not a valid index -> tell the user it was ignored
         if default is not None:
@@ -375,7 +375,7 @@ def choose_recipe(base: str, token: str, query: str) -> dict | None:
         answer = input(i18n.t("shopping.recipe_prompt")).strip()
     except EOFError:
         return None
-    if answer.isdigit() and 1 <= int(answer) <= len(hits):
+    if re.fullmatch(r"\d+", answer) and 1 <= int(answer) <= len(hits):
         return hits[int(answer) - 1]
     if answer:  # non-empty but not a valid index -> tell the user it was ignored
         print(i18n.t("choice.invalid_skip"), file=sys.stderr)

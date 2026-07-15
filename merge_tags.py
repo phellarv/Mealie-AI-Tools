@@ -103,10 +103,17 @@ def _review_pairs(pairs: list, by_name: dict, tag_recipes: dict, args) -> list:
 
 def _apply_merges(base: str, token: str, plans: list) -> int:
     """Retag each losing tag's recipes to the winner (best-effort per recipe),
-    then always delete the losing tag. Returns how many losing tags were
-    deleted (= merges completed)."""
+    then delete the losing tag only if every recipe was retagged successfully.
+    Returns how many merges completed (loser deleted).
+
+    Deleting the loser removes it from every recipe still carrying it, so a
+    recipe whose retag failed would lose the loser tag globally without ever
+    gaining the winner -- ending up with neither, unrecoverably. When any retag
+    in a plan fails the loser is left in place and the plan is not counted, so a
+    re-run can finish the merge (#94)."""
     applied = 0
     for plan in plans:
+        retag_failed = False
         for recipe in plan.recipes:
             new_tags = recipe_tags_after_merge(
                 recipe.get("tags", []), plan.loser["id"], plan.winner)
@@ -114,8 +121,12 @@ def _apply_merges(base: str, token: str, plans: list) -> int:
                 mealie_set_recipe_tags(base, token, recipe["slug"], new_tags)
                 recipe["tags"] = new_tags  # keep the shared summary current for later plans
             except MealieToolError as exc:
+                retag_failed = True
                 print(i18n.t("merge.retag_warn", slug=recipe.get("slug", ""),
                              error=exc) + error_detail(exc), file=sys.stderr)
+        if retag_failed:
+            print(i18n.t("merge.incomplete", name=plan.loser["name"]), file=sys.stderr)
+            continue
         try:
             mealie_delete_tag(base, token, plan.loser["id"])
             applied += 1

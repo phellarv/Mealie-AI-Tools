@@ -146,7 +146,7 @@ def mealie_base_url() -> str:
     sent unencrypted by accident (#38). Shared by the CLI and TUI (#31)."""
     global _insecure_url_warned
     base = require_env("MEALIE_URL").rstrip("/")
-    if not base.startswith("https://"):
+    if not base.lower().startswith("https://"):  # scheme is case-insensitive (RFC 3986) (#101)
         allow_http = os.environ.get("MEALIE_ALLOW_HTTP", "").strip().lower()
         if allow_http not in _TRUTHY:
             raise MealieToolError(i18n.t("cli.http_blocked", url=base))

@@ -27,6 +27,26 @@ from recipe_core import (
 )
 
 
+def _pick_image_base(parent: Path, stem: str) -> str:
+    """A filename base under `parent` with no existing file at ``<base>.*``.
+
+    generate_image writes ``<base>.<ext>``, so a free base guarantees the file
+    is created this run -- never clobbering a file the run did not create, and
+    always safe for cleanup to remove (#25/#39/#107). Prefer the slug stem
+    (only the JSON sits there); if a non-JSON sibling already exists at the
+    stem, fall back to ``<stem>-ai``, then ``<stem>-ai-2``, ... until free, so a
+    ``<stem>-ai.<ext>`` kept from an earlier --keep-files run is not overwritten
+    then deleted."""
+    if not any(p.suffix != ".json" for p in parent.glob(f"{stem}.*")):
+        return stem
+    n = 1
+    while True:
+        base = f"{stem}-ai" if n == 1 else f"{stem}-ai-{n}"
+        if not any(parent.glob(f"{base}.*")):
+            return base
+        n += 1
+
+
 def build_request_text(args: argparse.Namespace) -> str:
     """Assemble the natural-language recipe request from the CLI arguments.
 
@@ -196,13 +216,11 @@ def _publish(args, recipe: dict, json_path: Path, json_created: bool = True) -> 
         return 0
 
     image_path: Path | None = None
-    # If a file already sits at the slug stem, generate under a distinct "-ai"
-    # base so a hand-authored image's *content* is preserved, not just its name
-    # (#25/#39); otherwise use the slug stem. generate_image picks the extension
-    # from the response mime, so the final path isn't known up front.
-    image_base = (f"{json_path.stem}-ai"
-                  if any(p != json_path for p in json_path.parent.glob(f"{json_path.stem}.*"))
-                  else json_path.stem)
+    # Pick a base with no existing file, so a hand-authored image's *content*
+    # is preserved and a kept "<slug>-ai.<ext>" from a prior run is not
+    # clobbered (#25/#39/#107). generate_image picks the extension from the
+    # response mime, so the final path isn't known up front.
+    image_base = _pick_image_base(json_path.parent, json_path.stem)
     try:
         print(i18n.t("image.generating"), file=sys.stderr)
         image_path = generate_image(
@@ -222,8 +240,8 @@ def _publish(args, recipe: dict, json_path: Path, json_created: bool = True) -> 
         return 0
 
     if cleanup:
-        # image_path was written under a fresh name this run (a collision forced
-        # the "-ai" base above), so it is always ours to remove (#25/#39).
+        # image_path was written under a base with no pre-existing file (see
+        # _pick_image_base), so it is always this run's to remove (#25/#39/#107).
         _cleanup_files(json_cleanup + [image_path])
 
     print(i18n.t("done.url", url=url))

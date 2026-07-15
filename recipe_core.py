@@ -181,6 +181,15 @@ def _prescan_flag(argv: list[str], flag: str) -> str | None:
     return None
 
 
+def _chunks(items: list, size: int) -> list:
+    """Split `items` into consecutive chunks of at most `size` (floored to 1).
+
+    Shared by the batch modes (retag/describe/complete), which chunk their
+    recipe worklist for the batched Gemini calls (#113)."""
+    step = max(1, size)
+    return [items[i:i + step] for i in range(0, len(items), step)]
+
+
 def confirm(question: str) -> bool:
     """Ask a yes/no question on stdin; return True on an affirmative answer."""
     try:

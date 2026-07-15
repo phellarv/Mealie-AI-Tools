@@ -1,6 +1,6 @@
 [project]
 name = "mealie-tool"
-version = "1.0.0"
+version = "1.0.1"
 description = "Generate schema.org recipes with Google Gemini and publish them (with an AI-generated image) to Mealie, in a selectable language."
 readme = "README.md"
 license = { file = "LICENSE" }

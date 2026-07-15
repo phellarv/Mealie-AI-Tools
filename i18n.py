@@ -36,6 +36,13 @@ def _catalog(lang: str) -> dict[str, str]:
             _catalogs[lang] = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             _catalogs[lang] = {}
+        except json.JSONDecodeError as exc:
+            # A user- or contributor-added catalog with a JSON typo must not
+            # crash every command with a raw traceback: warn and fall back to
+            # an empty catalog, so t() drops through to the default/key (#106).
+            print(f"Warning: could not parse language catalog '{path.name}': {exc}",
+                  file=sys.stderr)
+            _catalogs[lang] = {}
     return _catalogs[lang]
 
 

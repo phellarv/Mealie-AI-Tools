@@ -24,7 +24,7 @@ from gemini import _gemini_generate_text, resolve_text_model
 from mealie_api import (
     MealieApiError, mealie_get_recipe, mealie_list_recipes, mealie_update_recipe,
 )
-from recipe_core import confirm, ingredient_texts, instruction_texts
+from recipe_core import _chunks, confirm, ingredient_texts, instruction_texts
 
 
 class RecipeCompletion(BaseModel):
@@ -113,12 +113,6 @@ def plan_fields(recipe: dict, answer: RecipeCompletion) -> dict:
     if missing_yield(recipe) and answer.servings and answer.servings > 0:
         fields["recipeServings"] = int(answer.servings)
     return fields
-
-
-def _chunks(items: list, size: int) -> list:
-    """Split ``items`` into consecutive chunks of at most ``size`` (floored 1)."""
-    step = max(1, size)
-    return [items[i:i + step] for i in range(0, len(items), step)]
 
 
 def _complete_prompt(batch: list) -> str:

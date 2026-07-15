@@ -27,7 +27,7 @@ from mealie_api import (
     MealieApiError, MealieResponseError, mealie_create_tag, mealie_get_recipe,
     mealie_get_tags, mealie_list_recipes, mealie_set_recipe_tags,
 )
-from recipe_core import ingredient_texts, slugify
+from recipe_core import _chunks, ingredient_texts, slugify
 
 
 class RecipeTags(BaseModel):
@@ -116,12 +116,6 @@ def parse_batch_response(indexed_tags: list, batch: list) -> dict:
         if 1 <= index <= len(batch):
             out[batch[index - 1]["slug"]] = list(tags)
     return out
-
-
-def _chunks(items: list, size: int) -> list:
-    """Split `items` into consecutive chunks of at most `size` (floored to 1)."""
-    step = max(1, size)
-    return [items[i:i + step] for i in range(0, len(items), step)]
 
 
 @dataclass
@@ -215,7 +209,16 @@ def _build_plans(ctx: _RetagCtx, thin: list, vocabulary: list) -> list:
     threshold (full fetch) is skipped."""
     plans: list = []
     for summaries in _chunks(thin, ctx.batch_size):
-        batch = [mealie_get_recipe(ctx.base, ctx.token, r["slug"]) for r in summaries]
+        batch = []
+        for summary in summaries:
+            try:
+                batch.append(mealie_get_recipe(ctx.base, ctx.token, summary["slug"]))
+            except MealieApiError as exc:
+                # A recipe deleted since the scan (404) or a transient network
+                # error drops only that recipe, preserving per-batch isolation
+                # (matches describe/complete).
+                print(i18n.t("retag.fetch_warn", slug=summary["slug"], error=exc)
+                      + error_detail(exc), file=sys.stderr)
         batch = [r for r in batch if is_thin(r.get("tags", []), ctx.min_tags)]
         if not batch:
             continue
@@ -288,11 +291,19 @@ def _apply_plans(ctx: _RetagCtx, plans: list, kept_new: set,
     applied = 0
     for plan in plans:
         names = final_tags(plan, kept_new, ctx.max_tags)
+        if names == dedup_ci(plan.existing):
+            # No tag was actually added (only-existing matches, or the user kept
+            # no new tags): skip the no-op PATCH so retag.done reflects real
+            # changes and no needless write hits the API (#111).
+            continue
         try:
             refs = _resolve_tag_refs(ctx, names, index)
             mealie_set_recipe_tags(ctx.base, ctx.token, plan.slug, refs)
             applied += 1
-        except MealieResponseError as exc:
+        except MealieApiError as exc:
+            # Broad MealieApiError (not just MealieResponseError) so a
+            # MealieConnectionError on one recipe is reported and skipped, not
+            # aborting the whole apply loop (#96; matches describe/complete).
             print(i18n.t("retag.apply_warn", slug=plan.slug, error=exc) + error_detail(exc),
                   file=sys.stderr)
     return applied

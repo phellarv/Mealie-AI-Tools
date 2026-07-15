@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Textual TUI for mealie-tool.
+"""Textual TUI for Mealie-AI-Tools (the mealie-tui command).
 
 Minimal flow: fill a form -> generate a recipe with Gemini -> preview it ->
 confirm -> run the publish pipeline (Mealie + image) with live status.
@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
@@ -284,7 +285,8 @@ class ChooseScreen(_AppScreen):
         yield Header()
         with Horizontal(id="choose"):
             options = [
-                Option(c.get("name") or i18n.t("tui.suggestion", n=i + 1), id=str(i))
+                Option(escape(c.get("name") or i18n.t("tui.suggestion", n=i + 1)),
+                       id=str(i))
                 for i, c in enumerate(self.candidates)
             ]
             yield OptionList(*options, id="candidates")
@@ -337,14 +339,24 @@ class ChooseScreen(_AppScreen):
         jsonld = to_jsonld(subset)
         warnings = validate_jsonld(jsonld)
         json_path = self.app.output_dir / f"{slug}.json"
-        # Pre-existing file: warn (write overwrites it) + record so cleanup keeps it (#25).
-        json_preexisting = json_path.exists()
+        # Pre-existing file: warn (write overwrites it) + record so cleanup keeps it
+        # (#25). A file THIS session already wrote (re-picking the same candidate)
+        # is ours, not pre-existing, so cleanup may remove it (#109).
+        json_preexisting = (json_path.exists()
+                            and json_path not in self.app.session_created_json)
         if json_preexisting:
             self.notify(i18n.t("overwrite.warn", path=json_path), severity="warning")
-        json_path.write_text(
-            json.dumps(jsonld, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        try:
+            json_path.write_text(
+                json.dumps(jsonld, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self.app.session_created_json.add(json_path)
+        except OSError as exc:
+            # A local-file failure must not crash the app (#108); surface it and
+            # stay put -- nothing was saved, so don't advance to the preview.
+            self.notify(i18n.t("write.error", path=json_path, error=exc), severity="error")
+            return
         state = RecipeState(subset, slug, jsonld, warnings, self.aspect, json_path,
                             json_preexisting=json_preexisting)
         self.app.push_screen(PreviewScreen(state))
@@ -428,7 +440,7 @@ class PreviewScreen(_AppScreen):
         # value == the ingredient's index in ingredient_texts(jsonld). Opt-in:
         # nothing starts selected (initial_state=False); the user ticks what to add.
         for i, text in enumerate(ingredient_texts(self.state.jsonld)):
-            selection.add_option((text, i, False))
+            selection.add_option((escape(text), i, False))
 
     def _threaded_load(self, getter, apply) -> None:
         """Fetch via getter(base, token) off-thread (best-effort) and marshal the
@@ -460,7 +472,9 @@ class PreviewScreen(_AppScreen):
             names.insert(0, default)
 
         select = self.query_one(select_id, Select)
-        select.set_options([(n, n) for n in names])
+        # Escape the visible label only; the value side (raw name) is matched
+        # against `default` below and read back verbatim, so it stays unescaped.
+        select.set_options([(escape(n), n) for n in names])
         select.value = default
 
     @work(thread=True, exclusive=True, group="categories")
@@ -491,7 +505,7 @@ class PreviewScreen(_AppScreen):
         selection = self.query_one("#tools", SelectionList)
         selection.clear_options()
         # value == tool name; resolved back to the full dict via _tools_by_name.
-        selection.add_options([(n, n) for n in names])
+        selection.add_options([(escape(n), n) for n in names])
 
     @work(thread=True, exclusive=True, group="shopping")
     def _load_shopping_lists(self) -> None:
@@ -505,7 +519,7 @@ class PreviewScreen(_AppScreen):
         # unless the user picks a list.
         self._shopping_lists = {lst["id"]: lst for lst in lists}
         select = self.query_one("#shopping-list", Select)
-        select.set_options([(lst["name"], lst["id"]) for lst in lists])
+        select.set_options([(escape(lst["name"]), lst["id"]) for lst in lists])
         default = _default_shopping_list(lists)
         if default is not None:
             select.value = default["id"]
@@ -532,10 +546,17 @@ class PreviewScreen(_AppScreen):
             self.state.jsonld["keywords"] = merge_keyword(keywords, cuisine)
         else:
             return
-        self.state.json_path.write_text(
-            json.dumps(self.state.jsonld, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        try:
+            self.state.json_path.write_text(
+                json.dumps(self.state.jsonld, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            # Persisting the organizer change failed; surface it and stop rather
+            # than crash the app (#108).
+            self.notify(i18n.t("write.error", path=self.state.json_path, error=exc),
+                        severity="error")
+            return
         self.query_one("#preview-md", Markdown).update(
             recipe_to_markdown(self.state.jsonld)
         )
@@ -863,7 +884,7 @@ class SearchScreen(_AppScreen):
             slug = hit.get("slug", "")
             link = f"{base}/g/{group}/r/{slug}"
             results.add_option(
-                Option(f"{hit.get('name', '')}  ->  {link}", id=slug or None)
+                Option(escape(f"{hit.get('name', '')}  ->  {link}"), id=slug or None)
             )
         if hits:
             results.highlighted = 0
@@ -898,10 +919,10 @@ class SearchScreen(_AppScreen):
         # value == index into self._ingredients. Opt-in: nothing starts selected
         # (initial_state=False); the user ticks what to add.
         for i, text in enumerate(self._ingredients):
-            selection.add_option((text, i, False))
+            selection.add_option((escape(text), i, False))
         self._shopping_lists = {lst["id"]: lst for lst in lists}
         select = self.query_one("#shopping-list", Select)
-        select.set_options([(lst["name"], lst["id"]) for lst in lists])
+        select.set_options([(escape(lst["name"]), lst["id"]) for lst in lists])
         default = _default_shopping_list(lists)
         if default is not None:
             select.value = default["id"]
@@ -945,7 +966,7 @@ class MealieApp(App):
     """The Textual application: wires the screens and shared state together."""
 
     TITLE = i18n.t("tui.app.title")
-    SUB_TITLE = "mealie-tool"
+    SUB_TITLE = "mealie-tui"
     BINDINGS = [("ctrl+q", "quit", i18n.t("tui.quit"))]
     CSS = """
     #form { padding: 1 2; }
@@ -974,6 +995,9 @@ class MealieApp(App):
         super().__init__()
         self.output_dir = Path.cwd()
         self.examples: list = []
+        # <slug>.json files this session wrote, so re-picking the same candidate
+        # doesn't mistake our own write for a pre-existing file and keep it (#109).
+        self.session_created_json: set[Path] = set()
         # test/inspection hooks, kept in lockstep with the UI
         self.status_lines: list[str] = []
         self.result_url: str | None = None

@@ -62,6 +62,12 @@ def _reject_tool_conflicts(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error(i18n.t("cli.transform_exclusive"))
     if args.adapt is not None and not args.diet:
         parser.error(i18n.t("cli.adapt_needs_diet"))
+    # --diet/--into are scoped to --adapt/--remix; reject them elsewhere rather
+    # than silently dropping the misplaced modifier (#105).
+    if args.diet and args.adapt is None:
+        parser.error(i18n.t("cli.diet_needs_adapt"))
+    if args.into and args.remix is None:
+        parser.error(i18n.t("cli.into_needs_remix"))
     if args.search is None and not transform_on:
         parser.error(i18n.t("cli.tool_no_mode"))
 

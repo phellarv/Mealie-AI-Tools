@@ -27,7 +27,7 @@ from mealie_api import (
     MealieApiError, mealie_get_recipe, mealie_list_recipes,
     mealie_set_recipe_description,
 )
-from recipe_core import confirm, ingredient_texts, instruction_texts
+from recipe_core import _chunks, confirm, ingredient_texts, instruction_texts
 
 # Runs of sentence terminators. sentence_count splits on this and counts the
 # non-empty fragments; a trailing un-terminated fragment counts as one sentence.
@@ -104,12 +104,6 @@ def parse_batch_response(indexed, batch) -> dict:
     return out
 
 
-def _chunks(items: list, size: int) -> list:
-    """Split ``items`` into consecutive chunks of at most ``size`` (floored 1)."""
-    step = max(1, size)
-    return [items[i:i + step] for i in range(0, len(items), step)]
-
-
 def _describe_prompt(batch: list, floor: int, max_text: int) -> str:
     """Assemble the batched describe prompt: instructions, then one block per
     recipe (index, name, category, ingredients, steps, existing description)."""
@@ -133,6 +127,11 @@ def _gemini_describe_batch(ctx: _DescribeCtx, batch: list):
     floor = generation_floor(ctx.min_text, ctx.max_text)
     contents = _describe_prompt(batch, floor, ctx.max_text)
     try:
+        # prompt.describe_system tells Gemini to answer in the recipe's OWN
+        # language rather than the active --lang. For a mixed-language library
+        # this is deliberately more robust than a hard active-language pin -- a
+        # Norwegian recipe stays Norwegian even in an English UI session
+        # (documented-intentional, #84).
         text = _gemini_generate_text(
             ctx.model, contents, list[RecipeDescription], 0.7,
             system_key="prompt.describe_system")

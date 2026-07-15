@@ -52,6 +52,8 @@
   "cli.similarity_range": "--similarity må være et tall mellom 0 og 1.",
   "cli.transform_exclusive": "--adapt/--remix/--translate er gjensidig utelukkende.",
   "cli.adapt_needs_diet": "--adapt krever --diet",
+  "cli.diet_needs_adapt": "--diet gjelder bare for --adapt.",
+  "cli.into_needs_remix": "--into gjelder bare for --remix.",
   "cli.translate_needs_lang": "--translate krever et målspråk: sett --lang (eller MEALIE_LANG), f.eks. --lang en.",
   "cli.companion_no_mode": "Velg ett modus: --audit, --retag, --merge-tags, --fill-images, --describe eller --complete.",
   "cli.companion_exclusive": "mealie-companion kjører ett modus om gangen.",
@@ -68,6 +70,7 @@
   "merge.aborted": "Avbrutt.",
   "merge.noninteractive": "Kjører uten terminal og uten --yes; avbryter (merge-tags er destruktivt).",
   "merge.retag_warn": "Advarsel: kunne ikke retagge «{slug}»: {error}",
+  "merge.incomplete": "Advarsel: «{name}» ble beholdt fordi én eller flere oppskrifter ikke kunne retagges; kjør --merge-tags på nytt for å fullføre sammenslåingen.",
   "merge.delete_warn": "Advarsel: kunne ikke slette taggen «{name}»: {error}",
   "merge.done": "Ferdig: {count} sammenslåing(er) utført.",
   "merge.no_tag_ids": "Feil: Mealie oppgir ingen tag-ID-er på oppskriftene, så sammenslåing kan ikke gjøres trygt. Avbryter uten å slette noe.",
@@ -120,7 +123,7 @@
   "req.name": "Ønsket navn på retten: {value}",
   "req.servings": "Antall porsjoner: {value}",
   "req.free_text": "Ønske/fritekst: {value}",
-  "req.empty_error": "Feil: beskriv oppskriften du vil ha. Oppgi fritekst og/eller --cuisine / --ingredients / --name. Eksempel:\n  mealie-tool \"kremet fiskesuppe\" --cuisine Norsk",
+  "req.empty_error": "Feil: beskriv oppskriften du vil ha. Oppgi fritekst og/eller --cuisine / --ingredients / --name. Eksempel:\n  mealie-generator \"kremet fiskesuppe\" --cuisine Norsk",
 
   "prompt.system": "Du er en profesjonell kokk og oppskriftsforfatter. Du lager komplette, gjennomførbare oppskrifter av restaurantkvalitet.\n\nRegler for svaret:\n- Skriv ALT på norsk (bokmål): navn, beskrivelse, ingredienser og fremgangsmåte.\n- description: fristende og appetittvekkende, 1-3 setninger.\n- recipeCategory: én kategori, f.eks. Middag, Lunsj, Dessert, Forrett, Frokost, Bakst.\n- keywords: kommaseparert liste med relevante søkeord.\n- recipeYield: antall porsjoner, f.eks. \"4 porsjoner\".\n- prepTime, cookTime og totalTime: ISO 8601-varighet, f.eks. PT15M eller PT1H15M.\n  totalTime skal være summen av prepTime og cookTime.\n- recipeIngredient: hver ingrediens med mengde og enhet, f.eks. \"500 g fersk spinat\".\n- recipeInstructions: hvert steg har et kort, beskrivende navn og en tydelig tekst.\n- Ikke bruk markdown eller nummerering inne i tekstfeltene.",
   "prompt.example_header": "Eksempel {i} på ønsket format, stil og detaljnivå:",
@@ -325,6 +328,7 @@
   "retag.none": "Ingen oppskrifter trenger flere tagger.",
   "retag.analyzing": "Analyserer {count} oppskrifter med {model} …",
   "retag.batch_warn": "Advarsel: en gruppe feilet og hoppes over: {error}",
+  "retag.fetch_warn": "Hoppet over {slug} (kunne ikke hentes): {error}",
   "retag.plan_header": "\nForslag:",
   "retag.plan_recipe": "  {name}",
   "retag.plan_reuse": "    gjenbruk: {tags}",
@@ -347,10 +351,10 @@
   "audit.fetch_warn": "Kunne ikke hente «{slug}»: {error}",
   "audit.gap.no_image": "mangler bilde (kjør --fill-images)",
   "audit.gap.no_tags": "for få tagger (kjør --retag)",
-  "audit.gap.no_category": "mangler kategori (kjør --categorize)",
+  "audit.gap.no_category": "mangler kategori",
   "audit.gap.no_times": "mangler tider (kjør --complete)",
   "audit.gap.no_yield": "mangler porsjoner (kjør --complete)",
   "audit.gap.no_description": "mangler beskrivelse (kjør --describe)",
-  "audit.gap.thin_instructions": "tynn fremgangsmåte (kjør --enrich-instructions)",
-  "audit.gap.no_nutrition": "mangler næringsinnhold (kjør --fill-nutrition)"
+  "audit.gap.thin_instructions": "tynn fremgangsmåte",
+  "audit.gap.no_nutrition": "mangler næringsinnhold"
 }

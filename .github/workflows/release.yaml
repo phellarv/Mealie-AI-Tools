@@ -19,6 +19,18 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build wheel + sdist
         run: uv build
+      - name: Assert built version matches the tag
+        # A vX.Y.Z tag on a commit whose pyproject version wasn't bumped would
+        # otherwise publish a release titled vX.Y.Z carrying a mis-versioned
+        # wheel with no failure (#118).
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          for f in dist/*; do
+            case "$f" in
+              *-"$ver"-*|*-"$ver".*) : ;;
+              *) echo "::error::$f does not match tag $GITHUB_REF_NAME (version $ver)"; exit 1 ;;
+            esac
+          done
       - name: Smoke-test the built wheel
         run: |
           python3 -m venv /tmp/smoke
@@ -30,6 +42,7 @@ jobs:
         run: |
           ver="${GITHUB_REF_NAME#v}"
           awk -v tag="$ver" '
+            BEGIN { gsub(/\./, "\\.", tag) }   # literal dots, so 1.0.0 != 1x0x0 (#118)
             $0 ~ "^## \\[" tag "\\]" {f=1; next}
             f && /^## \[/ {exit}
             f && /^\[[^][]*\]: / {exit}

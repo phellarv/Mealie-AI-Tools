@@ -52,6 +52,8 @@
   "cli.similarity_range": "--similarity must be a number between 0 and 1.",
   "cli.transform_exclusive": "--adapt/--remix/--translate are mutually exclusive.",
   "cli.adapt_needs_diet": "--adapt requires --diet",
+  "cli.diet_needs_adapt": "--diet only applies to --adapt.",
+  "cli.into_needs_remix": "--into only applies to --remix.",
   "cli.translate_needs_lang": "--translate requires a target language: set --lang (or MEALIE_LANG), e.g. --lang en.",
   "cli.companion_no_mode": "Pick one mode: --audit, --retag, --merge-tags, --fill-images, --describe or --complete.",
   "cli.companion_exclusive": "mealie-companion runs one mode at a time.",
@@ -68,6 +70,7 @@
   "merge.aborted": "Aborted.",
   "merge.noninteractive": "Running without a terminal and without --yes; aborting (merge-tags is destructive).",
   "merge.retag_warn": "Warning: could not retag '{slug}': {error}",
+  "merge.incomplete": "Warning: '{name}' was left in place because one or more recipes could not be retagged; re-run --merge-tags to finish the merge.",
   "merge.delete_warn": "Warning: could not delete the tag '{name}': {error}",
   "merge.done": "Done: {count} merge(s) completed.",
   "merge.no_tag_ids": "Error: Mealie exposes no tag ids on the recipes, so merging cannot be done safely. Aborting without deleting anything.",
@@ -120,7 +123,7 @@
   "req.name": "Desired recipe name: {value}",
   "req.servings": "Number of servings: {value}",
   "req.free_text": "Request/free text: {value}",
-  "req.empty_error": "Error: describe the recipe you want. Provide free text and/or --cuisine / --ingredients / --name. Example:\n  mealie-tool \"creamy fish soup\" --cuisine Norwegian",
+  "req.empty_error": "Error: describe the recipe you want. Provide free text and/or --cuisine / --ingredients / --name. Example:\n  mealie-generator \"creamy fish soup\" --cuisine Norwegian",
 
   "prompt.system": "You are a professional chef and recipe writer. You create complete, achievable, restaurant-quality recipes.\n\nRules for the response:\n- Write EVERYTHING in English: name, description, ingredients and instructions.\n- description: enticing and appetizing, 1-3 sentences.\n- recipeCategory: one category, e.g. Dinner, Lunch, Dessert, Starter, Breakfast, Baking.\n- keywords: comma-separated list of relevant search terms.\n- recipeYield: number of servings, e.g. \"4 servings\".\n- prepTime, cookTime and totalTime: ISO 8601 duration, e.g. PT15M or PT1H15M.\n  totalTime must be the sum of prepTime and cookTime.\n- recipeIngredient: each ingredient with amount and unit, e.g. \"500 g fresh spinach\".\n- recipeInstructions: each step has a short, descriptive name and a clear text.\n- Do not use markdown or numbering inside the text fields.",
   "prompt.example_header": "Example {i} of the desired format, style and level of detail:",
@@ -325,6 +328,7 @@
   "retag.none": "No recipes need more tags.",
   "retag.analyzing": "Analysing {count} recipes with {model} …",
   "retag.batch_warn": "Warning: a batch failed and was skipped: {error}",
+  "retag.fetch_warn": "Skipped {slug} (could not be fetched): {error}",
   "retag.plan_header": "\nSuggestions:",
   "retag.plan_recipe": "  {name}",
   "retag.plan_reuse": "    reuse: {tags}",
@@ -347,10 +351,10 @@
   "audit.fetch_warn": "Could not fetch \"{slug}\": {error}",
   "audit.gap.no_image": "missing image (run --fill-images)",
   "audit.gap.no_tags": "too few tags (run --retag)",
-  "audit.gap.no_category": "missing category (run --categorize)",
+  "audit.gap.no_category": "missing category",
   "audit.gap.no_times": "missing times (run --complete)",
   "audit.gap.no_yield": "missing servings (run --complete)",
   "audit.gap.no_description": "missing description (run --describe)",
-  "audit.gap.thin_instructions": "thin instructions (run --enrich-instructions)",
-  "audit.gap.no_nutrition": "missing nutrition (run --fill-nutrition)"
+  "audit.gap.thin_instructions": "thin instructions",
+  "audit.gap.no_nutrition": "missing nutrition"
 }

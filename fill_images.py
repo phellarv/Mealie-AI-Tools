@@ -60,6 +60,12 @@ def _fill_one(ctx: _FillCtx, summary: dict) -> bool:
     slug = summary.get("slug") or slugify(name)
     try:
         full = mealie_get_recipe(ctx.base, ctx.token, slug)
+        if not is_missing_image(full):
+            # The list summary may omit the image field (its contract guarantees
+            # only slug/name/tags), so a recipe that already has an image can be
+            # selected; re-check on the full fetch and skip it, never
+            # overwriting an existing photo (#112; matches describe/complete).
+            return False
         prompt = build_image_prompt(full, ingredient_texts(full))
         print(i18n.t("fill_images.generating", name=name), file=sys.stderr)
         # Never clobber a file this run did not create: if something already sits
