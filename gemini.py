@@ -26,7 +26,7 @@ from config import MealieToolError, require_env
 # GEMINI_IMAGE_MODEL set only in .env -- which loads after this module is
 # imported -- still takes effect (#23).
 DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
-DEFAULT_IMAGE_MODEL = "gemini-3-1-flash-image"
+DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image"
 DEFAULT_ASPECT = "4:3"
 
 # Request timeouts (whole seconds) for the Gemini SDK calls. Without an explicit

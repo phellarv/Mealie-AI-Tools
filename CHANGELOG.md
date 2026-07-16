@@ -7,16 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-16
+
+### Fixed
+- The default Gemini image model ID was malformed (`gemini-3-1-flash-image`,
+  with hyphens and no such model), so default image generation failed with a
+  `NOT_FOUND` error for anyone not overriding `GEMINI_IMAGE_MODEL` — a
+  regression since 1.0.0. Corrected to the valid `gemini-3.1-flash-image`
+  (the "Nano Banana 2" flash image model), verified against the live model
+  list.
+
 ## [1.1.0] - 2026-07-16
 
 ### Changed
 
-- **The CLI is now one command with subcommands (#146).** `mealie-tool` is the
-  single tool; each mode is a positional subcommand with its own `--help`:
-  `search`, `adapt`, `remix`, `translate`, `audit`, `retag`, `merge-tags`,
-  `fill-images`, `describe`, `complete`. Parameters stay as `--flags` after the
-  mode, e.g. `mealie-tool retag --min-tags 3 --dry-run`. `mealie-generator` and
-  `mealie-tui` are unchanged.
+- **`mealie-tool` is now one command with subcommands (#146).** Its modes are
+  positional subcommands, each with its own `--help`: `search`, `adapt`,
+  `remix`, `translate`, `audit`, `retag`, `merge-tags`, `fill-images`,
+  `describe`, `complete`. Parameters stay as `--flags` after the mode, e.g.
+  `mealie-tool retag --min-tags 3 --dry-run`. The suite still has three
+  commands: alongside `mealie-tool`, **`mealie-generator`** remains a separate
+  command that creates a new recipe from scratch (it is deliberately not a
+  `mealie-tool` subcommand), and **`mealie-tui`** remains the interactive
+  terminal app. Both are unchanged.
 
 ### Removed
 
@@ -151,7 +164,8 @@ code review. No user-facing features added and no breaking changes.
   references regenerated, so the public mirror shows no pre-GitHub history or
   dead compare links.
 
-[Unreleased]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/phellarv/Mealie-AI-Tools/compare/v0.5.0...v1.0.0

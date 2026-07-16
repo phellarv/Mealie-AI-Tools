@@ -87,7 +87,7 @@ Keys:
 - `GEMINI_TEXT_MODEL` — optional override of the text model (default
   `gemini-2.5-flash`); overridden per run by `--model`.
 - `GEMINI_IMAGE_MODEL` — optional override of the image model (default
-  `gemini-3-1-flash-image`).
+  `gemini-3.1-flash-image`).
 - `GEMINI_TIMEOUT` — optional per-request timeout for the Gemini calls, in whole
   seconds (defaults: 120 for text, 300 for image). Guards against a stalled
   connection hanging the tool; raise it on slow links or for large images.
@@ -114,8 +114,8 @@ translated in are selectable. The active language is chosen as `--lang` >
 changes unless you opt in:
 
 ```bash
-mealie-generator --lang en "creamy fish soup"      # English UI + English recipe
-mealie-generator "kremet fiskesuppe med reker"     # Norwegian (default)
+mealie-generator --lang en "creamy fish soup"   # English UI + English recipe
+mealie-generator "creamy fish soup with shrimp" # Norwegian UI + recipe (default)
 ```
 
 Each language is a small JSON catalog under `lang/` (`lang/no.json` is the
@@ -164,13 +164,13 @@ equivalent flow independently in its own screens (it does not import
 
 ```bash
 # Free text
-mealie-generator "rask kremet tomatsuppe med basilikum"
+mealie-generator "quick creamy tomato soup with basil"
 
 # By cuisine and/or ingredients
-mealie-generator --cuisine Italiensk --ingredients "kylling, sitron, hvitløk"
+mealie-generator --cuisine Italian --ingredients "chicken, lemon, garlic"
 
 # Force a name, and only generate + save the JSON (no upload, no image)
-mealie-generator --cuisine Thai --name "Grønn curry" --dry-run
+mealie-generator --cuisine Thai --name "Green curry" --dry-run
 ```
 
 ### Options
@@ -178,7 +178,7 @@ mealie-generator --cuisine Thai --name "Grønn curry" --dry-run
 | Flag             | Description                                                            |
 |------------------|------------------------------------------------------------------------|
 | `text` (args)    | Free-text description of the recipe                                    |
-| `--cuisine`      | Cuisine, e.g. `Italiensk`, `Thai`, `Meksikansk`                        |
+| `--cuisine`      | Cuisine, e.g. `Italian`, `Thai`, `Mexican`                            |
 | `--ingredients`  | Comma-separated ingredients to include                                 |
 | `--servings`     | Number of servings, e.g. `4`                                           |
 | `--name`         | Force a specific recipe name (also drives the slug/filename)           |
@@ -220,9 +220,9 @@ mealie-tool search "taco soup"
 |---------------------|------------------------------------------------------------------------|
 | `search QUERY`     | Search recipes, show matches with links, and optionally add a match's ingredients to a shopping list |
 | `adapt SLUG`       | Adapt an existing Mealie recipe (by slug) to a diet, building a new recipe via the publish pipeline; requires `--diet` |
-| `--diet`           | The diet/constraint for `adapt`, e.g. `vegansk`, `glutenfri`, `uten nøtter` |
+| `--diet`           | The diet/constraint for `adapt`, e.g. `vegan`, `gluten-free`, `nut-free` |
 | `remix SLUG`       | Create a new dish from the leftovers of an existing Mealie recipe (by slug), building a new recipe via the publish pipeline |
-| `--into`           | Optional target hint for `remix`, e.g. `suppe`                         |
+| `--into`           | Optional target hint for `remix`, e.g. `soup`                          |
 | `translate SLUG`   | Translate an existing Mealie recipe (by slug) into the active `--lang`, building a new recipe via the publish pipeline; requires an explicit `--lang`/`MEALIE_LANG` |
 | `--name`           | Force a specific recipe name for the new (adapted/remixed/translated) recipe |
 | `--model`          | Gemini text model (default `gemini-2.5-flash`; or `GEMINI_TEXT_MODEL`) |
@@ -256,8 +256,8 @@ is not a guarantee (especially for allergens). `mealie-tool remix <slug>
 [--into "<hint>"]` instead repurposes the source recipe's leftovers into a
 different dish, with an optional hint at the target dish.
 
-    mealie-tool adapt kjottdeig-lasagne --diet "vegansk"
-    mealie-tool remix helstekt-kylling --into "suppe"
+    mealie-tool adapt beef-lasagna --diet "vegan"
+    mealie-tool remix roast-chicken --into "soup"
 
 `adapt`, `remix` and `translate` cannot be combined with each other or with
 `search`; `adapt` requires `--diet`. `--dry-run`, `--yes`, `--force`,
@@ -274,7 +274,7 @@ active `--lang`, which **must** be set explicitly (translating to the default
 would just duplicate the recipe). The new recipe's description carries a
 "Translated from …" provenance line.
 
-    mealie-tool translate kremet-fiskesuppe --lang en
+    mealie-tool translate creamy-fish-soup --lang en
     mealie-tool translate enchiladas-verdes --lang de --yes
 
 ### Maintenance modes
@@ -348,8 +348,8 @@ the plan.
 
 ### `mealie-tool merge-tags` — merge similar tags
 
-`mealie-tool merge-tags` finds very similar tags (e.g. `Vegetar` /
-`Vegetarisk`), lets you keep one per pair, retags every recipe carrying the
+`mealie-tool merge-tags` finds very similar tags (e.g. `Vegetarian` /
+`Vegetarians`), lets you keep one per pair, retags every recipe carrying the
 losing tag with the kept one, then **deletes** the losing tag. Pairs are
 suggested by fuzzy match (`--similarity`, default `0.8`); the more-used tag is
 the default keeper.
@@ -420,17 +420,17 @@ mealie-tui
 ```
 
 Flow: fill the form (free text / cuisine / ingredients / name / servings /
-model / aspect) → **Generer** → Gemini returns **three** candidate recipes;
+model / aspect) → **Generate** → Gemini returns **three** candidate recipes;
 pick one from the list (the full preview updates live as you move the
-highlight) → scroll the preview, where a **Kategori** dropdown (populated from
+highlight) → scroll the preview, where a **Category** dropdown (populated from
 Mealie's existing categories, defaulting to a case-insensitive match with
-Gemini's suggestion) lets you change the category, and a **Kjøkken (tag)**
+Gemini's suggestion) lets you change the category, and a **Cuisine (tag)**
 dropdown (populated from Mealie's existing tags, same case-insensitive
 default) lets you change the cuisine tag, and a **Tools** selection (populated
 from Mealie's existing tools list) lets you attach one or more existing tools —
 applied to the recipe after upload via `PATCH /api/recipes/{slug}`, never
 written into the local JSON and never creating new tools — before upload →
-**Last opp til Mealie**, and watch the publish steps stream live. Only the chosen recipe is
+**Upload to Mealie**, and watch the publish steps stream live. Only the chosen recipe is
 saved to disk (and, like the CLI, removed after a successful upload). It reuses
 the same config discovery (`~/.config/Mealie-AI-Tools/.env`, falling back to
 `./.env`), so it works from anywhere once installed. A "force" checkbox on the
@@ -448,7 +448,7 @@ recipes and lists the matches together with their Mealie links; picking a
 result loads its ingredients so you can add a selection to a shopping list
 the same way, without generating anything new.
 
-From the search screen you can also press **"Lag mat"** on a picked recipe to
+From the search screen you can also press **"Cook"** on a picked recipe to
 enter **cooking mode** (#18): first a tickable ingredient checklist, then the
 instructions one highlighted step at a time (`j`/`k` or the arrow keys to move,
 `Esc` to go back).

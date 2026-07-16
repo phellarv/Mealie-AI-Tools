@@ -2,10 +2,13 @@
 
 Finds fuzzy-similar tag pairs (difflib), lets the user keep one per pair, then
 retags every recipe carrying the losing tag with the kept one and deletes the
-loser. The pure helpers (find_similar_pairs, recipe_tags_after_merge,
-_tag_recipe_map) carry the logic and are unit-tested in isolation;
-run_merge_tags_mode (added later) wires them to the Mealie API and the CLI
-picker.
+loser. Ahead of the fuzzy pass, exact-name and case-variant duplicates -- the
+clearest duplicates the mode exists to fold, which the fuzzy pass cannot see --
+are surfaced as guaranteed top-priority merges (find_duplicate_groups, #110).
+The pure helpers (find_similar_pairs, find_duplicate_groups,
+recipe_tags_after_merge, _tag_recipe_map) carry the logic and are unit-tested in
+isolation; run_merge_tags_mode (added later) wires them to the Mealie API and
+the CLI picker.
 """
 from __future__ import annotations
 
@@ -47,6 +50,49 @@ def find_similar_pairs(names: list[str], threshold: float) -> list[tuple[str, st
                 scored.append((ratio, first, second))
     scored.sort(key=lambda item: (-item[0], item[1].lower(), item[2].lower()))
     return [(first, second) for _, first, second in scored]
+
+
+def find_duplicate_groups(tags: list, tag_recipes: dict) -> list:
+    """Exact-duplicate merge plans: tags whose names are identical ignoring case
+    and surrounding whitespace but which are distinct records (different ids).
+
+    These are the clearest duplicates the mode exists to fold, yet the fuzzy pass
+    can never surface them -- ``find_similar_pairs`` folds case-variants out and
+    ``run_merge_tags_mode`` keys tags by raw name, collapsing same-name tags to
+    one entry (#110). Tags are grouped on ``name.strip().lower()``; any group with
+    >= 2 id-bearing tags yields one ``MergePlan`` per loser, all folding into a
+    single keeper -- the most-used tag (by recipe count in ``tag_recipes``), ties
+    broken by the lexicographically-first id for determinism. Tags with a blank or
+    missing name, or no id, are ignored (they cannot be merged). Plans are ordered
+    most-recipes-moved first, then by loser name and id, so the output is stable.
+    """
+    groups: dict[str, list] = {}
+    for tag in tags:
+        name = (tag.get("name") or "").strip()
+        key = name.lower()
+        if key and tag.get("id"):
+            groups.setdefault(key, []).append(tag)
+    plans: list = []
+    for members in groups.values():
+        # Collapse repeated records of the same tag to one per id, so a keeper
+        # can never also surface as a loser (a loser.id == winner.id plan would
+        # delete the kept tag in _apply_merges).
+        by_id: dict = {}
+        for tag in members:
+            by_id.setdefault(tag["id"], tag)
+        if len(by_id) < 2:
+            continue
+        ordered = sorted(
+            by_id.values(),
+            key=lambda tag: (-len(tag_recipes.get(tag["id"], [])), str(tag["id"])))
+        winner = ordered[0]
+        for loser in ordered[1:]:
+            plans.append(MergePlan(loser=loser, winner=winner,
+                                   recipes=tag_recipes.get(loser["id"], [])))
+    plans.sort(key=lambda plan: (-len(plan.recipes),
+                                 str(plan.loser.get("name") or "").lower(),
+                                 str(plan.loser["id"])))
+    return plans
 
 
 def recipe_tags_after_merge(recipe_tags: list, loser_id, winner: dict) -> list:
@@ -155,13 +201,19 @@ def run_merge_tags_mode(args) -> int:
     tag_recipes = _tag_recipe_map(recipes)
     if not tag_recipes and any(r.get("tags") for r in recipes):
         raise MealieToolError(i18n.t("merge.no_tag_ids"))
-    by_name = {t["name"]: t for t in tags if t.get("name")}
+
+    # Exact-name / case-variant duplicates first (#110); the fuzzy pass then runs
+    # over the tags they did not consume, so no tag is touched twice in one run.
+    exact_plans = find_duplicate_groups(tags, tag_recipes)
+    consumed = {t["id"] for plan in exact_plans for t in (plan.winner, plan.loser)}
+    remaining = [t for t in tags if t.get("id") not in consumed]
+    by_name = {t["name"]: t for t in remaining if t.get("name")}
     pairs = find_similar_pairs(list(by_name), args.similarity)
-    if not pairs:
+    if not exact_plans and not pairs:
         print(i18n.t("merge.none"))
         return 0
 
-    plans = _review_pairs(pairs, by_name, tag_recipes, args)
+    plans = exact_plans + _review_pairs(pairs, by_name, tag_recipes, args)
     if not plans:
         print(i18n.t("merge.nothing"))
         return 0
