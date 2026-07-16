@@ -1,6 +1,6 @@
 """Shared CLI plumbing for the mealie-* commands (#88 SP2).
 
-The three entry points (mealie_generator / mealie_companion / mealie_tool) each
+The two entry points (mealie_generator / mealie_tool) each
 declare only their own flags and dispatch to the mode modules; this module holds
 what would otherwise be triplicated: the shared/publish flag sets, the
 translated-help language pre-resolution, the .env/lang/debug bootstrap, and the

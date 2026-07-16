@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install (or remove) the `mealie-generator` / `mealie-companion` /
+# Install (or remove) the `mealie-generator` /
 # `mealie-tool` / `mealie-tui` commands as an isolated uv tool, and seed a
 # per-user config file. Repo-independent: once installed, the checkout is not
 # needed at runtime. Safe to re-run.
@@ -19,7 +19,7 @@ usage() {
     cat <<EOF
 Usage: ./install.sh [options]
 
-Installs the mealie-generator / mealie-companion / mealie-tool / mealie-tui
+Installs the mealie-generator / mealie-tool / mealie-tui
 commands with 'uv tool install' (an isolated copy — the repo is not needed at
 runtime) and seeds a config file at:
     $CONFIG_DIR/.env
@@ -49,7 +49,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if [ "$UNINSTALL" = "1" ]; then
-    echo "Uninstalling mealie-generator / mealie-companion / mealie-tool / mealie-tui ..."
+    echo "Uninstalling mealie-generator / mealie-tool / mealie-tui ..."
     uv tool uninstall mealie-tool
     echo "Done. (Left $CONFIG_DIR untouched — remove it by hand if you want.)"
     exit 0
@@ -64,7 +64,7 @@ fi
 #    silently re-resolving) and pass it via --constraints, pinning every resolved
 #    dependency to exactly the locked version. Re-run after a `uv lock` bump to
 #    move versions forward deliberately.
-echo "Installing mealie-generator / mealie-companion / mealie-tool / mealie-tui with uv tool ..."
+echo "Installing mealie-generator / mealie-tool / mealie-tui with uv tool ..."
 CONSTRAINTS="$(mktemp)"
 trap 'rm -f "$CONSTRAINTS"' EXIT
 uv export --frozen --no-dev --no-emit-project --no-hashes \
@@ -97,5 +97,5 @@ echo
 echo "If the commands are not found, put uv's tool bin dir on your PATH:"
 echo "    uv tool update-shell     # then restart your shell"
 echo
-echo "Done. Run 'mealie-generator --help', 'mealie-companion --help',"
-echo "'mealie-tool --help', or 'mealie-tui' from any directory."
+echo "Done. Run 'mealie-generator --help', 'mealie-tool --help',"
+echo "or 'mealie-tui' from any directory."

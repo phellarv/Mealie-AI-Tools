@@ -36,7 +36,6 @@ jobs:
           python3 -m venv /tmp/smoke
           /tmp/smoke/bin/pip install --quiet dist/*.whl
           /tmp/smoke/bin/mealie-generator --help
-          /tmp/smoke/bin/mealie-companion --help
           /tmp/smoke/bin/mealie-tool --help
       - name: Extract changelog section for this tag
         run: |

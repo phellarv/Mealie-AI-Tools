@@ -1,6 +1,6 @@
 [project]
 name = "mealie-tool"
-version = "1.0.1"
+version = "1.1.0"
 description = "Generate schema.org recipes with Google Gemini and publish them (with an AI-generated image) to Mealie, in a selectable language."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -34,7 +34,6 @@ dependencies = [
 mealie-tool = "mealie_tool:main"
 mealie-tui = "mealie_tui:main"
 mealie-generator = "mealie_generator:main"
-mealie-companion = "mealie_companion:main"
 
 [project.urls]
 Repository = "https://git.duckboot.net/Duckboot/Mealie-AI-Tools"
@@ -105,4 +104,4 @@ build-backend = "hatchling.build"
 # lang/*.json land next to the modules, where i18n.py locates them via
 # Path(__file__).parent / "lang".
 [tool.hatch.build.targets.wheel]
-include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "recipe_core.py", "publish.py", "retag.py", "merge_tags.py", "fill_images.py", "describe.py", "audit.py", "transform.py", "complete.py", "cli_common.py", "mealie_generator.py", "mealie_companion.py", "lang/*.json"]
+include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "recipe_core.py", "publish.py", "retag.py", "merge_tags.py", "fill_images.py", "describe.py", "audit.py", "transform.py", "complete.py", "cli_common.py", "mealie_generator.py", "lang/*.json"]

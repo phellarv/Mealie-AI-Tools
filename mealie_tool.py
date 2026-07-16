@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""mealie-tool: search Mealie recipes, and transform an existing recipe into a
-new one (adapt / remix / translate) -- the "rest" after the #88 CLI split.
+"""mealie-tool: the unified Mealie recipe tool (#146).
 
-Generation from scratch moved to mealie-generator, and the maintenance
-flag-modes (audit/retag/merge-tags/fill-images/describe/complete) moved to
-mealie-companion; this command keeps only --search (#13/#14) and the three
-transform modes, which publish a NEW recipe built from an existing one.
+One command with positional subcommands. Two families:
+  * work with existing recipes: search / adapt / remix / translate
+  * clean up existing recipes:  audit / retag / merge-tags / fill-images /
+    describe / complete
+Each subcommand has its own --help; its parameters are --flags placed after the
+mode. From-scratch generation stays in mealie-generator; the interactive app
+stays in mealie-tui.
+
+This module is a thin argparse-and-dispatch shell: a _MODE_BUILDERS registry
+builds one subparser per mode, each storing its positional/flags under the
+attribute names the (unchanged) mode modules already read, then dispatching via
+set_defaults(func=...). The mode logic lives in audit.py / retag.py /
+merge_tags.py / fill_images.py / describe.py / complete.py / transform.py, and
+the shared CLI plumbing in cli_common.py.
 """
 from __future__ import annotations
 
@@ -14,11 +23,176 @@ import sys
 
 import cli_common
 import i18n
+from audit import run_audit_mode
 from cli_pickers import choose_ingredients, choose_recipe, choose_shopping_list
+from complete import run_complete_mode
 from config import error_detail, mealie_base_url, require_env
+from describe import run_describe_mode
+from fill_images import run_fill_images_mode
+from gemini import DEFAULT_ASPECT, DEFAULT_TEXT_MODEL
 from mealie_api import MealieApiError, mealie_add_shopping_item, mealie_get_recipe
+from merge_tags import run_merge_tags_mode
 from recipe_core import ingredient_texts
+from retag import run_retag_mode
 from transform import run_transform_mode
+
+DEFAULT_MIN_TAGS = 5
+DEFAULT_MAX_TAGS = 8
+DEFAULT_BATCH_SIZE = 10
+DEFAULT_SIMILARITY = 0.8
+
+
+# --------------------------------------------------------------------------- #
+# small flag helpers, shared by several subcommands
+# --------------------------------------------------------------------------- #
+
+def _add_limit(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--limit", type=int, default=None, help=i18n.t("cli.help.limit"))
+
+
+def _add_model(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--model", default=None,
+                        help=i18n.t("cli.help.model", default=DEFAULT_TEXT_MODEL))
+
+
+def _add_batch_size(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=i18n.t("cli.help.batch_size", default=DEFAULT_BATCH_SIZE))
+
+
+def _add_min_tags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--min-tags", type=int, default=DEFAULT_MIN_TAGS,
+                        help=i18n.t("cli.help.min_tags", default=DEFAULT_MIN_TAGS))
+
+
+def _sub(subparsers, common: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
+    """Create a subparser named `name`, sharing the common flags and reusing the
+    mode's existing cli.help.* one-liner for both its list entry and its own
+    --help description."""
+    summary = i18n.t("cli.help." + name.replace("-", "_"))
+    return subparsers.add_parser(
+        name, parents=[common], help=summary, description=summary,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# per-mode subparser builders -- each stores under the attrs its run_*_mode reads
+# --------------------------------------------------------------------------- #
+
+def _build_search(subparsers, common):
+    parser = _sub(subparsers, common, "search")
+    parser.add_argument("search", metavar="QUERY", help=i18n.t("cli.help.search"))
+    parser.set_defaults(func=_run_search_mode)
+
+
+def _build_adapt(subparsers, common):
+    parser = _sub(subparsers, common, "adapt")
+    parser.add_argument("adapt", metavar="SLUG", help=i18n.t("cli.help.adapt"))
+    parser.add_argument("--diet", help=i18n.t("cli.help.diet"))
+    cli_common.add_publish_args(parser)
+    parser.set_defaults(func=run_transform_mode, remix=None, translate=None)
+
+
+def _build_remix(subparsers, common):
+    parser = _sub(subparsers, common, "remix")
+    parser.add_argument("remix", metavar="SLUG", help=i18n.t("cli.help.remix"))
+    parser.add_argument("--into", help=i18n.t("cli.help.into"))
+    cli_common.add_publish_args(parser)
+    parser.set_defaults(func=run_transform_mode, adapt=None, translate=None)
+
+
+def _build_translate(subparsers, common):
+    parser = _sub(subparsers, common, "translate")
+    parser.add_argument("translate", metavar="SLUG", help=i18n.t("cli.help.translate"))
+    cli_common.add_publish_args(parser)
+    parser.set_defaults(func=run_transform_mode, adapt=None, remix=None)
+
+
+def _build_audit(subparsers, common):
+    parser = _sub(subparsers, common, "audit")
+    _add_min_tags(parser)
+    _add_limit(parser)
+    parser.set_defaults(func=run_audit_mode)
+
+
+def _build_retag(subparsers, common):
+    parser = _sub(subparsers, common, "retag")
+    _add_min_tags(parser)
+    parser.add_argument("--max-tags", type=int, default=DEFAULT_MAX_TAGS,
+                        help=i18n.t("cli.help.max_tags", default=DEFAULT_MAX_TAGS))
+    _add_batch_size(parser)
+    _add_model(parser)
+    _add_limit(parser)
+    parser.set_defaults(func=run_retag_mode)
+
+
+def _build_merge_tags(subparsers, common):
+    parser = _sub(subparsers, common, "merge-tags")
+    parser.add_argument("--similarity", type=float, default=DEFAULT_SIMILARITY,
+                        help=i18n.t("cli.help.similarity", default=DEFAULT_SIMILARITY))
+    parser.set_defaults(func=run_merge_tags_mode)
+
+
+def _build_fill_images(subparsers, common):
+    parser = _sub(subparsers, common, "fill-images")
+    parser.add_argument("--aspect", default=DEFAULT_ASPECT, choices=cli_common.ASPECT_CHOICES,
+                        help=i18n.t("cli.help.aspect", default=DEFAULT_ASPECT))
+    parser.add_argument("--output-dir", help=i18n.t("cli.help.output_dir"))
+    parser.add_argument("--keep-files", action="store_true", help=i18n.t("cli.help.keep_files"))
+    _add_limit(parser)
+    parser.set_defaults(func=run_fill_images_mode)
+
+
+def _build_describe(subparsers, common):
+    parser = _sub(subparsers, common, "describe")
+    parser.add_argument("--min-text", type=int, default=None, help=i18n.t("cli.help.min_text"))
+    parser.add_argument("--max-text", type=int, default=4,
+                        help=i18n.t("cli.help.max_text", default=4))
+    _add_batch_size(parser)
+    _add_model(parser)
+    _add_limit(parser)
+    parser.set_defaults(func=run_describe_mode)
+
+
+def _build_complete(subparsers, common):
+    parser = _sub(subparsers, common, "complete")
+    _add_batch_size(parser)
+    _add_model(parser)
+    _add_limit(parser)
+    parser.set_defaults(func=run_complete_mode)
+
+
+_MODE_BUILDERS = {
+    "search": _build_search,
+    "adapt": _build_adapt,
+    "remix": _build_remix,
+    "translate": _build_translate,
+    "audit": _build_audit,
+    "retag": _build_retag,
+    "merge-tags": _build_merge_tags,
+    "fill-images": _build_fill_images,
+    "describe": _build_describe,
+    "complete": _build_complete,
+}
+MODE_NAMES = tuple(_MODE_BUILDERS)
+
+
+def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Per-mode value checks argparse can't express structurally. (--translate's
+    target-language requirement stays in run_transform_mode: it reads MEALIE_LANG
+    from .env, which is loaded after parse.)"""
+    if args.mode == "adapt" and not args.diet:
+        parser.error(i18n.t("cli.adapt_needs_diet"))
+    if args.mode == "retag" and args.max_tags < args.min_tags:
+        parser.error(i18n.t("cli.retag_minmax"))
+    if args.mode == "merge-tags" and not 0 < args.similarity <= 1:
+        parser.error(i18n.t("cli.similarity_range"))
+    if args.mode == "describe":
+        if args.max_text < 1:
+            parser.error(i18n.t("cli.describe_max_text"))
+        if args.min_text is not None and args.max_text < args.min_text:
+            parser.error(i18n.t("cli.describe_minmax"))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -30,46 +204,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=i18n.t("cli.epilog.tool"),
     )
-    parser.add_argument("--search", metavar="QUERY", help=i18n.t("cli.help.search"))
-    parser.add_argument("--adapt", metavar="SLUG", help=i18n.t("cli.help.adapt"))
-    parser.add_argument("--remix", metavar="SLUG", help=i18n.t("cli.help.remix"))
-    parser.add_argument("--translate", metavar="SLUG", help=i18n.t("cli.help.translate"))
-    parser.add_argument("--diet", help=i18n.t("cli.help.diet"))
-    parser.add_argument("--into", help=i18n.t("cli.help.into"))
-    cli_common.add_publish_args(parser)
-    cli_common.add_common_args(parser)
+    common = argparse.ArgumentParser(add_help=False)
+    cli_common.add_common_args(common)
+    subparsers = parser.add_subparsers(dest="mode", required=True, metavar="MODE")
+    for build in _MODE_BUILDERS.values():
+        build(subparsers, common)
 
     args = parser.parse_args(argv)
-    _reject_tool_conflicts(parser, args)
+    _validate(parser, args)
     return args
-
-
-def _reject_tool_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Require exactly one of --search / a transform flag, plus --adapt's --diet
-    requirement and the transform flags' own mutual exclusivity.
-
-    --translate's target-language requirement is deliberately NOT re-checked
-    here: transform.run_transform_mode already enforces it (verified against
-    transform.py during implementation, #88), and it checks os.environ AFTER
-    cli_common.bootstrap has loaded .env -- a guard here would run before .env
-    is read and would wrongly reject a --translate call that relies on a
-    .env-only MEALIE_LANG, as well as double-checking the same condition."""
-    transform_on = (args.adapt is not None or args.remix is not None
-                    or args.translate is not None)
-    if args.search is not None and transform_on:
-        parser.error(i18n.t("cli.tool_search_exclusive"))
-    if sum(x is not None for x in (args.adapt, args.remix, args.translate)) > 1:
-        parser.error(i18n.t("cli.transform_exclusive"))
-    if args.adapt is not None and not args.diet:
-        parser.error(i18n.t("cli.adapt_needs_diet"))
-    # --diet/--into are scoped to --adapt/--remix; reject them elsewhere rather
-    # than silently dropping the misplaced modifier (#105).
-    if args.diet and args.adapt is None:
-        parser.error(i18n.t("cli.diet_needs_adapt"))
-    if args.into and args.remix is None:
-        parser.error(i18n.t("cli.into_needs_remix"))
-    if args.search is None and not transform_on:
-        parser.error(i18n.t("cli.tool_no_mode"))
 
 
 def _run_search_mode(args) -> int:
@@ -102,9 +245,7 @@ def _run_search_mode(args) -> int:
 def _main() -> int:
     args = parse_args(sys.argv[1:])
     cli_common.bootstrap(args)
-    if args.search is not None:
-        return _run_search_mode(args)
-    return run_transform_mode(args)
+    return args.func(args)
 
 
 def main() -> int:

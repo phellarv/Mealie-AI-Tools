@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-16
+
+### Changed
+
+- **The CLI is now one command with subcommands (#146).** `mealie-tool` is the
+  single tool; each mode is a positional subcommand with its own `--help`:
+  `search`, `adapt`, `remix`, `translate`, `audit`, `retag`, `merge-tags`,
+  `fill-images`, `describe`, `complete`. Parameters stay as `--flags` after the
+  mode, e.g. `mealie-tool retag --min-tags 3 --dry-run`. `mealie-generator` and
+  `mealie-tui` are unchanged.
+
+### Removed
+
+- **`mealie-companion` is removed (breaking).** Its six modes moved onto
+  `mealie-tool`: `mealie-companion --audit` → `mealie-tool audit`, `--retag` →
+  `mealie-tool retag`, `--merge-tags` → `mealie-tool merge-tags`, `--fill-images`
+  → `mealie-tool fill-images`, `--describe` → `mealie-tool describe`,
+  `--complete` → `mealie-tool complete`.
+- **The old `mealie-tool` flag-modes are removed (breaking).**
+  `mealie-tool --search X` → `mealie-tool search X`; `--adapt SLUG` →
+  `mealie-tool adapt SLUG`; `--remix SLUG` → `mealie-tool remix SLUG`;
+  `--translate SLUG` → `mealie-tool translate SLUG`.
+
 ## [1.0.1] - 2026-07-15
 
 Maintenance release: the fixes, hardening and test coverage from the post-1.0.0
@@ -128,7 +151,8 @@ code review. No user-facing features added and no breaking changes.
   references regenerated, so the public mirror shows no pre-GitHub history or
   dead compare links.
 
-[Unreleased]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/phellarv/Mealie-AI-Tools/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/phellarv/Mealie-AI-Tools/releases/tag/v0.5.0
