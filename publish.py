@@ -14,16 +14,16 @@ from cli_pickers import (
     choose_category, choose_cuisine_tag, choose_ingredients,
     choose_shopping_list, choose_tools,
 )
-from config import MealieToolError, error_detail, mealie_base_url, require_env
+from config import MealieToolError, mealie_base_url, message_with_detail, require_env
 from gemini import build_image_prompt, generate_image
 from mealie_api import (
     MealieApiError, mealie_add_shopping_item, mealie_create_recipe,
     mealie_find_existing, mealie_group_slug, mealie_set_recipe_tools,
-    mealie_upload_image,
+    mealie_upload_image, with_retries,
 )
 from recipe_core import (
     _cleanup_files, confirm, ingredient_texts, merge_keyword, remove_keyword,
-    slugify, to_jsonld, validate_jsonld, with_retries,
+    slugify, to_jsonld, validate_jsonld,
 )
 
 
@@ -129,7 +129,31 @@ def _attach_tools(base: str, token: str, created_slug: str, chosen_tools: list[d
         print(i18n.t("tui.log.tools_ok",
                      value=", ".join(t["name"] for t in chosen_tools)))
     except MealieApiError as exc:
-        print(i18n.t("tui.log.tools_warn", error=exc) + error_detail(exc), file=sys.stderr)
+        print(message_with_detail("tui.log.tools_warn", exc), file=sys.stderr)
+
+
+def add_notes_to_shopping_list(chosen: dict, notes: list, add_one) -> None:
+    """Add each note to the chosen shopping list, best-effort per item, then print
+    the full or partial add count.
+
+    Shared by the generator/transform upload flow and the ``search`` subcommand so
+    a mid-loop failure never leaves the list half-populated while the run reports
+    outright failure (#39/#235). ``add_one(note)`` performs one add and may raise
+    MealieApiError; it is invoked through the caller's own binding (a closure), so
+    each caller's ``mealie_add_shopping_item`` is used and patched at its own site.
+    """
+    added = 0
+    for note in notes:
+        try:
+            add_one(note)
+            added += 1
+        except MealieApiError:
+            pass
+    if added == len(notes):
+        print(i18n.t("shopping.added", count=added, list=chosen["name"]))
+    else:
+        print(i18n.t("shopping.added_partial", added=added, total=len(notes),
+                     list=chosen["name"], failed=len(notes) - added), file=sys.stderr)
 
 
 def _add_to_shopping_list(base: str, token: str, recipe: dict) -> None:
@@ -148,20 +172,75 @@ def _add_to_shopping_list(base: str, token: str, recipe: dict) -> None:
     chosen = choose_shopping_list(base, token)
     if not chosen:
         return
-    # Add per item so one failure doesn't silently leave the list half-populated
-    # with the run reported as failed; report the count actually added (#39).
-    added = 0
-    for note in selected:
-        try:
-            mealie_add_shopping_item(base, token, chosen["id"], note)
-            added += 1
-        except MealieApiError:
-            pass
-    if added == len(selected):
-        print(i18n.t("shopping.added", count=added, list=chosen["name"]))
-    else:
-        print(i18n.t("shopping.added_partial", added=added, total=len(selected),
-                     list=chosen["name"], failed=len(selected) - added), file=sys.stderr)
+    add_notes_to_shopping_list(
+        chosen, selected,
+        lambda note: mealie_add_shopping_item(base, token, chosen["id"], note))
+
+
+def _duplicate_blocked(base: str, token: str, recipe: dict, force: bool) -> bool:
+    """Return True (after printing the error) when a same-name recipe already
+    exists and ``force`` is not set; the caller then aborts with exit 1.
+
+    Runs before organizer prompts or any file re-write, so a known collision
+    wastes none of the user's interaction and leaves the on-disk file untouched
+    (#37)."""
+    duplicates = mealie_find_existing(base, token, recipe["name"])
+    if duplicates and not force:
+        print(
+            i18n.t("dup.error", name=i18n.t("quote", value=recipe["name"]),
+                   count=len(duplicates)),
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
+def _best_effort_image(args, recipe: dict, json_path: Path, upload) -> Path | None:
+    """Generate a food photo and upload it via ``upload`` (best-effort).
+
+    Returns the local image path on success (so the caller can clean it up), or
+    None if generation/upload failed -- the warning is printed here and any
+    generated file is left in place for manual inspection. The recipe already
+    exists at this point, so a failure here never fails the run.
+
+    Picks a base with no existing file so a hand-authored image's *content* is
+    preserved and a kept "<slug>-ai.<ext>" from a prior run is not clobbered
+    then deleted (#25/#39/#107); generate_image picks the extension from the
+    response mime, so the final path isn't known up front."""
+    image_base = _pick_image_base(json_path.parent, json_path.stem)
+    try:
+        print(i18n.t("image.generating"), file=sys.stderr)
+        image_path = generate_image(
+            json_path.parent, f"{image_base}.png",
+            build_image_prompt(recipe), args.aspect)
+        with_retries(lambda: upload(image_path))
+        print(i18n.t("image.ok", name=image_path.name))
+        return image_path
+    except MealieToolError as exc:
+        print(message_with_detail("image.warn", exc), file=sys.stderr)
+        print(i18n.t("image.warn_detail"), file=sys.stderr)
+        return None
+
+
+def _finalize(args, json_path: Path, json_created: bool,
+              image_path: Path | None, url: str) -> int:
+    """Clean up local artifacts and print the closing line; always returns 0.
+
+    Removes the cached <slug>.json -- unless --keep-files, and never a file this
+    run did not create (json_created=False) -- plus the generated image, but
+    only when its upload succeeded (image_path is None on --no-image or a
+    best-effort image failure, so a stray image is left in place). The 'done'
+    url is printed only on a successful image, matching the prior branches."""
+    to_remove = [json_path] if json_created else []
+    if image_path is not None:
+        # image_path was written under a base with no pre-existing file (see
+        # _pick_image_base), so it is always this run's to remove (#25/#39/#107).
+        to_remove.append(image_path)
+    if not args.keep_files:
+        _cleanup_files(to_remove)
+    if image_path is not None:
+        print(i18n.t("done.url", url=url))
+    return 0
 
 
 def _publish(args, recipe: dict, json_path: Path, json_created: bool = True) -> int:
@@ -174,20 +253,17 @@ def _publish(args, recipe: dict, json_path: Path, json_created: bool = True) -> 
 
     ``json_created`` is False when ``<slug>.json`` pre-existed (only reachable
     under --force); in that case cleanup never deletes it -- we do not remove a
-    file this run did not create (#25)."""
+    file this run did not create (#25). The individual steps live in the helpers
+    above (_duplicate_blocked / _select_organizers / _attach_tools /
+    _add_to_shopping_list / _best_effort_image / _finalize) so each concern is
+    read and tested on its own (#178)."""
     base = mealie_base_url()
     token = require_env("MEALIE_API_TOKEN")
 
     # Check for a duplicate name up front, before prompting for organizers or
     # re-writing <slug>.json, so a known collision aborts without wasting the
     # user's interaction or modifying the on-disk file (#37).
-    duplicates = mealie_find_existing(base, token, recipe["name"])
-    if duplicates and not args.force:
-        print(
-            i18n.t("dup.error", name=i18n.t("quote", value=recipe["name"]),
-                   count=len(duplicates)),
-            file=sys.stderr,
-        )
+    if _duplicate_blocked(base, token, recipe, args.force):
         return 1
 
     chosen_tools: list[dict] = []
@@ -204,48 +280,15 @@ def _publish(args, recipe: dict, json_path: Path, json_created: bool = True) -> 
         _add_to_shopping_list(base, token, recipe)
 
     # The recipe is now in Mealie, so the cached <slug>.json has served its
-    # purpose. Remove it unless the user opted out with --keep-files. The image
-    # (if any) is cleaned up separately, only once its upload has succeeded.
-    # Never delete a <slug>.json this run did not create (json_created=False).
-    cleanup = not args.keep_files
-    json_cleanup = [json_path] if json_created else []
-
-    if args.no_image:
-        if cleanup:
-            _cleanup_files(json_cleanup)
-        return 0
-
+    # purpose; _finalize removes it (unless --keep-files) and the image only
+    # once its upload has succeeded. The image step is best-effort: on --no-image
+    # or a failure image_path stays None, so _finalize skips its cleanup.
     image_path: Path | None = None
-    # Pick a base with no existing file, so a hand-authored image's *content*
-    # is preserved and a kept "<slug>-ai.<ext>" from a prior run is not
-    # clobbered (#25/#39/#107). generate_image picks the extension from the
-    # response mime, so the final path isn't known up front.
-    image_base = _pick_image_base(json_path.parent, json_path.stem)
-    try:
-        print(i18n.t("image.generating"), file=sys.stderr)
-        image_path = generate_image(
-            json_path.parent, f"{image_base}.png",
-            build_image_prompt(recipe), args.aspect)
-        with_retries(lambda: mealie_upload_image(base, token, created_slug, image_path))
-        print(i18n.t("image.ok", name=image_path.name))
-    except MealieToolError as exc:
-        print(i18n.t("image.warn", error=exc) + error_detail(exc), file=sys.stderr)
-        print(i18n.t("image.warn_detail"), file=sys.stderr)
-        # The recipe was created successfully; the image is best-effort, so a
-        # failure here is not a total failure. Exit 0 to match the message.
-        # Clean up the JSON (the recipe exists), but leave any generated image
-        # in place so it can be inspected or uploaded manually later.
-        if cleanup:
-            _cleanup_files(json_cleanup)
-        return 0
-
-    if cleanup:
-        # image_path was written under a base with no pre-existing file (see
-        # _pick_image_base), so it is always this run's to remove (#25/#39/#107).
-        _cleanup_files(json_cleanup + [image_path])
-
-    print(i18n.t("done.url", url=url))
-    return 0
+    if not args.no_image:
+        image_path = _best_effort_image(
+            args, recipe, json_path,
+            lambda p: mealie_upload_image(base, token, created_slug, p))
+    return _finalize(args, json_path, json_created, image_path, url)
 
 
 def _ensure_output_dir(output_dir: Path) -> None:

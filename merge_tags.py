@@ -12,18 +12,19 @@ the CLI picker.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 import i18n
 from cli_pickers import choose_merge_keeper, dedup_ci
-from config import MealieToolError, error_detail, mealie_base_url, require_env
+from config import MealieToolError, mealie_base_url, message_with_detail, require_env
 from mealie_api import (
     MealieApiError, mealie_delete_tag, mealie_get_tags, mealie_list_recipes,
     mealie_set_recipe_tags,
 )
-from recipe_core import confirm
+from recipe_core import confirm, slugify
 
 
 @dataclass
@@ -147,6 +148,16 @@ def _review_pairs(pairs: list, by_name: dict, tag_recipes: dict, args) -> list:
     return plans
 
 
+def _tag_ref(tag: dict) -> dict:
+    """A tag ref safe for ``mealie_set_recipe_tags`` even when a recipe summary
+    omits ``name``/``slug`` on a carried-over tag: fill a blank name and derive a
+    missing slug from the name, so building the PATCH payload never raises an
+    uncaught KeyError (#230). retag sidesteps this by resolving refs through its
+    fetched tag index; merge trusts the summary shape, so normalise it here."""
+    name = tag.get("name") or ""
+    return {"id": tag.get("id"), "name": name, "slug": tag.get("slug") or slugify(name)}
+
+
 def _apply_merges(base: str, token: str, plans: list) -> int:
     """Retag each losing tag's recipes to the winner (best-effort per recipe),
     then delete the losing tag only if every recipe was retagged successfully.
@@ -161,15 +172,15 @@ def _apply_merges(base: str, token: str, plans: list) -> int:
     for plan in plans:
         retag_failed = False
         for recipe in plan.recipes:
-            new_tags = recipe_tags_after_merge(
-                recipe.get("tags", []), plan.loser["id"], plan.winner)
+            new_tags = [_tag_ref(t) for t in recipe_tags_after_merge(
+                recipe.get("tags", []), plan.loser["id"], plan.winner)]
             try:
                 mealie_set_recipe_tags(base, token, recipe["slug"], new_tags)
                 recipe["tags"] = new_tags  # keep the shared summary current for later plans
             except MealieToolError as exc:
                 retag_failed = True
-                print(i18n.t("merge.retag_warn", slug=recipe.get("slug", ""),
-                             error=exc) + error_detail(exc), file=sys.stderr)
+                print(message_with_detail("merge.retag_warn", exc,
+                                          slug=recipe.get("slug", "")), file=sys.stderr)
         if retag_failed:
             print(i18n.t("merge.incomplete", name=plan.loser["name"]), file=sys.stderr)
             continue
@@ -177,8 +188,8 @@ def _apply_merges(base: str, token: str, plans: list) -> int:
             mealie_delete_tag(base, token, plan.loser["id"])
             applied += 1
         except MealieApiError as exc:
-            print(i18n.t("merge.delete_warn", name=plan.loser["name"],
-                         error=exc) + error_detail(exc), file=sys.stderr)
+            print(message_with_detail("merge.delete_warn", exc,
+                                       name=plan.loser["name"]), file=sys.stderr)
     return applied
 
 
@@ -190,7 +201,7 @@ def _print_merge_plan(plans: list) -> None:
                      count=len(plan.recipes), winner=plan.winner["name"]))
 
 
-def run_merge_tags_mode(args) -> int:
+def run_merge_tags_mode(args: argparse.Namespace) -> int:
     """Merge-tags entry: suggest similar tag pairs, keep one per pair, retag the
     loser's recipes and delete the loser. Returns the process exit code."""
     base = mealie_base_url()
@@ -207,7 +218,15 @@ def run_merge_tags_mode(args) -> int:
     exact_plans = find_duplicate_groups(tags, tag_recipes)
     consumed = {t["id"] for plan in exact_plans for t in (plan.winner, plan.loser)}
     remaining = [t for t in tags if t.get("id") not in consumed]
-    by_name = {t["name"]: t for t in remaining if t.get("name")}
+    # Key by the stripped name: find_similar_pairs (via dedup_ci) strips names,
+    # so a pair token for " Taco " is "Taco"; keying by the raw name would then
+    # miss it in _review_pairs and silently drop the pair (#224). find_duplicate_
+    # groups already consumed any same-stripped-lower duplicates above, so no two
+    # remaining tags collide on the stripped key. Require an ``id`` too (mirroring
+    # find_duplicate_groups' guard): _review_pairs dereferences tag['id'], so an
+    # id-less tag paired by the fuzzy pass would otherwise raise KeyError (#214).
+    by_name = {t["name"].strip(): t for t in remaining
+               if (t.get("name") or "").strip() and t.get("id")}
     pairs = find_similar_pairs(list(by_name), args.similarity)
     if not exact_plans and not pairs:
         print(i18n.t("merge.none"))

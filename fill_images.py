@@ -9,20 +9,24 @@ Mealie API, the Gemini image call and the CLI confirmation.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import cli_common
+import curation
 import i18n
 from config import (
-    MealieToolError, error_detail, mealie_base_url, require_env,
+    MealieToolError, mealie_base_url, message_with_detail, require_env,
 )
 from gemini import build_image_prompt, generate_image
 from mealie_api import (
-    mealie_get_recipe, mealie_list_recipes, mealie_upload_image,
+    mealie_get_recipe, mealie_list_recipes, mealie_upload_image, with_retries,
 )
+from publish import _ensure_output_dir, _pick_image_base
 from recipe_core import (
-    _cleanup_files, confirm, ingredient_texts, slugify, with_retries,
+    _cleanup_files, confirm, ingredient_texts, slugify,
 )
 
 # Values Mealie stores in a recipe summary's ``image`` field when there is no
@@ -58,8 +62,18 @@ def _fill_one(ctx: _FillCtx, summary: dict) -> bool:
     """
     name = summary.get("name", "")
     slug = summary.get("slug") or slugify(name)
+    # `slug` is the Mealie identifier used for the HTTP calls below. Derive a
+    # filesystem-safe base for the local image file separately: the slug is
+    # external (Mealie may hold web-imported/third-party recipes), so re-slugify
+    # it before using it as a path component -- a crafted slug like "../../evil"
+    # would otherwise escape output_dir (#154). slugify yields a single
+    # [a-z0-9-] component and is idempotent on an already-valid slug.
+    file_base = slugify(slug)
+    image_path = None  # tracked so a failed upload cleans up the file it created
     try:
-        full = mealie_get_recipe(ctx.base, ctx.token, slug)
+        # Idempotent read: retry a transient blip rather than treating it as a
+        # best-effort drop of this recipe (#180).
+        full = with_retries(lambda: mealie_get_recipe(ctx.base, ctx.token, slug))
         if not is_missing_image(full):
             # The list summary may omit the image field (its contract guarantees
             # only slug/name/tags), so a recipe that already has an image can be
@@ -68,20 +82,27 @@ def _fill_one(ctx: _FillCtx, summary: dict) -> bool:
             return False
         prompt = build_image_prompt(full, ingredient_texts(full))
         print(i18n.t("fill_images.generating", name=name), file=sys.stderr)
-        # Never clobber a file this run did not create: if something already sits
-        # at the slug stem, generate under a distinct "-ai" base (mirrors
-        # publish._publish). generate_image picks the extension from the
-        # response mime, so the final path is not known up front.
-        image_base = (f"{slug}-ai"
-                      if any(ctx.output_dir.glob(f"{slug}.*"))
-                      else slug)
+        # Never clobber a file this run did not create: pick a base with no
+        # existing file at "<base>.*" via the shared publish helper. Its
+        # incrementing "-ai", "-ai-2", ... escalation means a kept "<slug>-ai.png"
+        # from a prior --keep-files run is not overwritten then deleted (#238);
+        # the single "-ai" fallback used before could clobber exactly that file.
+        # generate_image picks the extension from the response mime, so the final
+        # path is not known up front.
+        image_base = _pick_image_base(ctx.output_dir, file_base)
         image_path = generate_image(
             ctx.output_dir, f"{image_base}.png", prompt, ctx.aspect)
         with_retries(
             lambda: mealie_upload_image(ctx.base, ctx.token, slug, image_path))
     except MealieToolError as exc:
-        print(i18n.t("fill_images.image_warn", error=exc) + error_detail(exc),
+        print(message_with_detail("fill_images.image_warn", exc),
               file=sys.stderr)
+        # If the image was generated before the failure (an upload rejection), it
+        # was written under a fresh name this run and is ours to remove -- leaving
+        # it only under --keep-files, matching the success path rather than letting
+        # a failed upload accumulate orphans (#222).
+        if image_path is not None and not ctx.keep_files:
+            _cleanup_files([image_path])
         return False
     print(i18n.t("fill_images.image_ok", name=name))
     if not ctx.keep_files:
@@ -101,43 +122,20 @@ def _preview(missing: list[dict]) -> None:
                      slug=summary.get("slug", "")))
 
 
-def _confirm_batch(args, count: int) -> int | None:
-    """Confirmation gate for the (costly, mutating) batch. Returns None to
-    proceed, or an exit code to return instead: 1 for a non-interactive run
-    without --yes, 0 for an interactive decline. Mirrors the guard in
-    mealie_tool._main / run_merge_tags_mode, but returns the code so the
-    three-way outcome (proceed / decline / non-tty) survives."""
-    if args.yes:
-        return None
-    if not sys.stdin.isatty():
-        print(i18n.t("fill_images.noninteractive"), file=sys.stderr)
-        return 1
-    if not confirm(i18n.t("fill_images.confirm", count=count)):
-        print(i18n.t("fill_images.aborted"))
-        return 0
-    return None
-
-
-def run_fill_images_mode(args) -> int:
+def run_fill_images_mode(args: argparse.Namespace) -> int:
     """Fill-images mode entry: scan Mealie for recipes with no image, preview
     them, confirm once, then generate + upload a photo for each (best-effort).
     Returns the process exit code."""
     base = mealie_base_url()
     token = require_env("MEALIE_API_TOKEN")
-    output_dir = Path(args.output_dir).resolve() if args.output_dir else Path.cwd()
-    # Create the output dir up front (images are written here), wrapped as a
-    # clean error rather than a raw traceback (mirrors mealie_tool._main
-    # closely enough to trip R0801; both are the same small guard clause, not
-    # accidental duplication -- same rationale as merge_tags.py).
-    # pylint: disable=duplicate-code
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise MealieToolError(
-            i18n.t("output_dir.error", path=output_dir, error=exc)) from exc
+    output_dir = cli_common.resolve_output_dir(args)
+    # Create the output dir up front (images are written here), wrapping an
+    # OSError as a clean error via the shared publish helper (#157).
+    _ensure_output_dir(output_dir)
 
     print(i18n.t("fill_images.fetching"), file=sys.stderr)
-    recipes = mealie_list_recipes(base, token)
+    # Idempotent read: retry a transient blip rather than aborting the run (#180).
+    recipes = with_retries(lambda: mealie_list_recipes(base, token))
     missing = [r for r in recipes if is_missing_image(r)]
     print(i18n.t("fill_images.scanned", total=len(recipes), missing=len(missing)),
           file=sys.stderr)
@@ -152,7 +150,7 @@ def run_fill_images_mode(args) -> int:
         print(i18n.t("dry_run.done"))
         return 0
 
-    rc = _confirm_batch(args, len(missing))
+    rc = curation.confirm_batch(args, len(missing), "fill_images", confirm)
     if rc is not None:
         return rc
 

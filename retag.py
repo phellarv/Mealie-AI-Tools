@@ -14,20 +14,25 @@ CLI pickers.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import dataclass
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel
 
 import i18n
 from cli_pickers import _unique_sorted_names, choose_new_tags, dedup_ci
-from config import MealieToolError, error_detail, mealie_base_url, require_env
-from gemini import _gemini_generate_text, resolve_text_model
+from config import mealie_base_url, require_env
+from curation import (
+    BatchPlan, RunCtx, apply_plans, build_batched_plans, map_by_index,
+    run_gemini_batch,
+)
+from gemini import TEMP_STRUCTURED, _gemini_generate_text, resolve_text_model
 from mealie_api import (
     MealieApiError, MealieResponseError, mealie_create_tag, mealie_get_recipe,
-    mealie_get_tags, mealie_list_recipes, mealie_set_recipe_tags,
+    mealie_get_tags, mealie_list_recipes, mealie_set_recipe_tags, with_retries,
 )
-from recipe_core import _chunks, ingredient_texts, slugify
+from recipe_core import category_names, ingredient_texts, slugify
 
 
 class RecipeTags(BaseModel):
@@ -111,21 +116,15 @@ def parse_batch_response(indexed_tags: list, batch: list) -> dict:
     `batch`. An index outside 1..len(batch) is ignored and a recipe with no
     pair simply gets no suggestions, so a dropped or spurious entry never sinks
     the batch. Returns {slug: [tag, ...]}."""
-    out: dict = {}
-    for index, tags in indexed_tags:
-        if 1 <= index <= len(batch):
-            out[batch[index - 1]["slug"]] = list(tags)
-    return out
+    return map_by_index(indexed_tags, batch,
+                        lambda pair: pair[0], lambda pair: list(pair[1]))
 
 
 @dataclass
-class _RetagCtx:
-    """Resolved run context threaded through the orchestration helpers, so each
-    stays within pylint's argument budget."""
+class _RetagCtx(RunCtx):
+    """The retag run context: the shared base/token/model (from RunCtx) plus the
+    tag thresholds and batch size."""
 
-    base: str
-    token: str
-    model: str
     min_tags: int
     max_tags: int
     batch_size: int
@@ -143,9 +142,7 @@ def _tag_names(tags) -> list[str]:
 
 def _recipe_categories(recipe) -> str:
     """Comma-joined category names of a Mealie recipe (empty string if none)."""
-    return ", ".join(
-        c.get("name", "") for c in recipe.get("recipeCategory", [])
-        if isinstance(c, dict) and c.get("name"))
+    return ", ".join(category_names(recipe))
 
 
 def _index_tag(index: dict, tag: dict) -> None:
@@ -192,49 +189,45 @@ def _gemini_retag_batch(ctx: _RetagCtx, batch: list, vocabulary: list):
     """One batched Gemini call: returns [(index, tags), ...], or None if the
     call or its validation fails (the batch is then skipped with a warning)."""
     contents = _retag_prompt(batch, vocabulary, ctx.min_tags, ctx.max_tags)
-    try:
-        text = _gemini_generate_text(
-            ctx.model, contents, list[RecipeTags], 0.4,
-            system_key="prompt.retag_system")
-        items = TypeAdapter(list[RecipeTags]).validate_json(text)
-    except (MealieToolError, ValueError) as exc:
-        print(i18n.t("retag.batch_warn", error=exc) + error_detail(exc), file=sys.stderr)
+    items = run_gemini_batch(
+        lambda: _gemini_generate_text(
+            ctx.model, contents, list[RecipeTags], TEMP_STRUCTURED,
+            system_key="prompt.retag_system"),
+        RecipeTags, "retag.batch_warn")
+    if items is None:
         return None
     return [(item.index, item.tags) for item in items]
 
 
 def _build_plans(ctx: _RetagCtx, thin: list, vocabulary: list) -> list:
     """Fetch each thin recipe in batches, ask Gemini, and build a RecipePlan per
-    recipe that has any suggestion. A recipe that turns out to already meet the
-    threshold (full fetch) is skipped."""
-    plans: list = []
-    for summaries in _chunks(thin, ctx.batch_size):
-        batch = []
-        for summary in summaries:
-            try:
-                batch.append(mealie_get_recipe(ctx.base, ctx.token, summary["slug"]))
-            except MealieApiError as exc:
-                # A recipe deleted since the scan (404) or a transient network
-                # error drops only that recipe, preserving per-batch isolation
-                # (matches describe/complete).
-                print(i18n.t("retag.fetch_warn", slug=summary["slug"], error=exc)
-                      + error_detail(exc), file=sys.stderr)
-        batch = [r for r in batch if is_thin(r.get("tags", []), ctx.min_tags)]
-        if not batch:
-            continue
-        pairs = _gemini_retag_batch(ctx, batch, vocabulary)
-        if pairs is None:
-            continue
+    recipe that has any suggestion (via the shared build_batched_plans loop). A
+    recipe that turns out to already meet the threshold (full fetch) is skipped
+    by the keep re-check; a suggestion with neither an existing-vocabulary match
+    nor a new tag is dropped by expand."""
+    def expand(batch: list, pairs: list) -> list:
         slug_tags = parse_batch_response(pairs, batch)
+        out: list = []
         for recipe in batch:
             matched, new = categorise(slug_tags.get(recipe["slug"], []), vocabulary)
             if not matched and not new:
                 continue
-            plans.append(RecipePlan(
+            out.append(RecipePlan(
                 slug=recipe["slug"], name=recipe.get("name", ""),
                 existing=_tag_names(recipe.get("tags", [])),
                 matched=matched, new=new))
-    return plans
+        return out
+
+    spec = BatchPlan(
+        # Idempotent read: retry a transient blip so the recipe is not dropped
+        # from the batch (a dropped recipe looks like one with nothing to fix) (#180).
+        fetch=lambda slug: with_retries(
+            lambda: mealie_get_recipe(ctx.base, ctx.token, slug)),
+        keep=lambda recipe: is_thin(recipe.get("tags", []), ctx.min_tags),
+        gemini_batch=lambda batch: _gemini_retag_batch(ctx, batch, vocabulary),
+        expand=expand,
+        warn_key="retag.fetch_warn")
+    return build_batched_plans(thin, ctx.batch_size, spec)
 
 
 def _get_or_create_tag(ctx: _RetagCtx, name: str, index: dict):
@@ -288,25 +281,27 @@ def _apply_plans(ctx: _RetagCtx, plans: list, kept_new: set,
     """PATCH each plan's final tag set onto its recipe (best-effort). Returns
     how many recipes were updated; a per-recipe failure is reported and skipped.
     `index` (keyed by name and slug) is reused and extended across recipes."""
-    applied = 0
+    # Pre-compute each plan's final tags and drop the no-ops (only-existing
+    # matches, or the user kept no new tags) so retag.done reflects real changes
+    # and no needless write hits the API (#111). The surviving plans then go
+    # through the shared best-effort apply loop -- ref resolution AND the PATCH
+    # run inside its try, so a MealieConnectionError on one recipe is reported
+    # and skipped, not aborting the run (#96; the broad MealieApiError catch
+    # lives in curation.apply_plans).
+    changed: list = []
+    names_by_slug: dict = {}
     for plan in plans:
         names = final_tags(plan, kept_new, ctx.max_tags)
         if names == dedup_ci(plan.existing):
-            # No tag was actually added (only-existing matches, or the user kept
-            # no new tags): skip the no-op PATCH so retag.done reflects real
-            # changes and no needless write hits the API (#111).
             continue
-        try:
-            refs = _resolve_tag_refs(ctx, names, index)
-            mealie_set_recipe_tags(ctx.base, ctx.token, plan.slug, refs)
-            applied += 1
-        except MealieApiError as exc:
-            # Broad MealieApiError (not just MealieResponseError) so a
-            # MealieConnectionError on one recipe is reported and skipped, not
-            # aborting the whole apply loop (#96; matches describe/complete).
-            print(i18n.t("retag.apply_warn", slug=plan.slug, error=exc) + error_detail(exc),
-                  file=sys.stderr)
-    return applied
+        changed.append(plan)
+        names_by_slug[plan.slug] = names
+
+    def apply_one(plan) -> None:
+        refs = _resolve_tag_refs(ctx, names_by_slug[plan.slug], index)
+        mealie_set_recipe_tags(ctx.base, ctx.token, plan.slug, refs)
+
+    return apply_plans(changed, apply_one, "retag.apply_warn")
 
 
 def _print_plan(plans: list, all_new: list) -> None:
@@ -337,7 +332,7 @@ def _choose_kept_new(all_new: list, args) -> list:
     return choose_new_tags(all_new)
 
 
-def run_retag_mode(args) -> int:
+def run_retag_mode(args: argparse.Namespace) -> int:
     """Retag mode entry: scan Mealie for under-tagged recipes, propose tags
     (batched Gemini, existing-vocabulary-first), confirm new tags once, and
     PATCH them on. Returns the process exit code."""
@@ -349,7 +344,8 @@ def run_retag_mode(args) -> int:
 
     vocabulary, tag_index = _load_vocabulary(base, token)
     print(i18n.t("retag.fetching"), file=sys.stderr)
-    recipes = mealie_list_recipes(base, token)
+    # Idempotent read: retry a transient blip rather than aborting the run (#180).
+    recipes = with_retries(lambda: mealie_list_recipes(base, token))
     thin = [r for r in recipes if is_thin(r.get("tags", []), args.min_tags)]
     print(i18n.t("retag.scanned", total=len(recipes), thin=len(thin)),
           file=sys.stderr)

@@ -5,17 +5,30 @@ name: Release
 on:
   push:
     tags: ['v*.*.*']
-permissions:
-  contents: write
+
+# Serialize per tag so a manual re-run cannot race an in-flight release for the
+# same tag; never cancel a partially-created release (#234).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   release:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
+    # Bound build + smoke + release so a hung step cannot hold a runner (#264).
+    timeout-minutes: 20
+    # Least-privilege: only this job needs write (to create the GitHub Release),
+    # so scope it here instead of at workflow level -- any job added later stays
+    # read-only by default (#229). Mirrors publish-to-github.yaml.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Install uv
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # Version-pinned installer so uv cannot drift between runs; keep in
+          # lockstep with the uv used in local dev and in ci.yaml (#254).
+          curl -LsSf https://astral.sh/uv/0.11.29/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build wheel + sdist
         run: uv build
@@ -37,6 +50,10 @@ jobs:
           /tmp/smoke/bin/pip install --quiet dist/*.whl
           /tmp/smoke/bin/mealie-generator --help
           /tmp/smoke/bin/mealie-tool --help
+          # mealie-tui --help resolves the entry point and exits without
+          # launching the full-screen app, so all three published console
+          # scripts are verified here rather than only two (#250).
+          /tmp/smoke/bin/mealie-tui --help
       - name: Extract changelog section for this tag
         run: |
           ver="${GITHUB_REF_NAME#v}"
@@ -51,4 +68,14 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file NOTES.md dist/*
+        # Idempotent create-or-edit: a re-run for an already-created tag (e.g.
+        # after a transient failure in an earlier step) reconciles the release
+        # and re-uploads assets instead of dying on "release already exists",
+        # mirroring gitea_release.py's 409-is-success contract (#236).
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file NOTES.md
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file NOTES.md dist/*
+          fi

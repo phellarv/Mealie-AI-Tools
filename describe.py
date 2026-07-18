@@ -12,26 +12,35 @@ batched Gemini call and the CLI.
 """
 from __future__ import annotations
 
+import argparse
 import re
-import sys
 from dataclasses import dataclass
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel
 
 import i18n
-from config import (
-    MealieToolError, error_detail, mealie_base_url, require_env,
+from config import mealie_base_url, require_env
+from curation import (
+    BatchMode, BatchPlan, RunCtx, apply_plans, build_batched_plans,
+    map_by_index, run_batch_mode, run_gemini_batch,
 )
-from gemini import _gemini_generate_text, resolve_text_model
+from gemini import TEMP_CREATIVE, _gemini_generate_text, resolve_text_model
 from mealie_api import (
-    MealieApiError, mealie_get_recipe, mealie_list_recipes,
-    mealie_set_recipe_description,
+    mealie_get_recipe, mealie_list_recipes, mealie_set_recipe_description,
+    with_retries,
 )
-from recipe_core import _chunks, confirm, ingredient_texts, instruction_texts
+from recipe_core import (
+    category_names, confirm, ingredient_texts, instruction_texts,
+)
 
 # Runs of sentence terminators. sentence_count splits on this and counts the
 # non-empty fragments; a trailing un-terminated fragment counts as one sentence.
 _SENTENCE_SPLIT = re.compile(r"[.!?]+")
+
+# Default lower bound (in sentences) for a generated description when --min-text
+# is not given; capped at max_text so the floor never exceeds the ceiling (see
+# generation_floor) (#162).
+DESCRIBE_FLOOR_DEFAULT = 2
 
 
 class RecipeDescription(BaseModel):
@@ -52,12 +61,10 @@ class DescriptionPlan:
 
 
 @dataclass
-class _DescribeCtx:
-    """Resolved run context threaded through the orchestration helpers."""
+class _DescribeCtx(RunCtx):
+    """The describe run context: the shared base/token/model (from RunCtx) plus
+    the sentence-length bounds and batch size."""
 
-    base: str
-    token: str
-    model: str
     min_text: int | None
     max_text: int
     batch_size: int
@@ -90,18 +97,39 @@ def is_under_described(recipe: dict, min_text: int | None) -> bool:
 
 def generation_floor(min_text: int | None, max_text: int) -> int:
     """The lower bound of the generated length: ``min_text`` if set, else
-    ``min(2, max_text)`` so the floor never exceeds the ceiling."""
-    return min_text if min_text is not None else min(2, max_text)
+    ``min(DESCRIBE_FLOOR_DEFAULT, max_text)`` so the floor never exceeds the
+    ceiling."""
+    return min_text if min_text is not None else min(DESCRIBE_FLOOR_DEFAULT, max_text)
 
 
 def parse_batch_response(indexed, batch) -> dict:
     """Map Gemini's (1-based index, text) pairs back onto the recipes in
     ``batch``. An index outside 1..len(batch) is ignored. Returns {slug: text}."""
-    out: dict = {}
-    for index, text in indexed:
-        if 1 <= index <= len(batch):
-            out[batch[index - 1]["slug"]] = text
-    return out
+    return map_by_index(indexed, batch, lambda pair: pair[0], lambda pair: pair[1])
+
+
+def embed_description_marker(generated: str, original: str) -> str:
+    """Append a persistent AI marker to a describe-written description so the AI
+    authorship travels into Mealie with the recipe (#181), mirroring how
+    recipe_core.to_jsonld embeds ``disclaimer.ai_recipe`` on the from-scratch
+    flow -- not just the ephemeral stderr notice.
+
+    If the recipe already carried the stronger allergen caveat
+    (``disclaimer.ai_recipe``, from the from-scratch/transform flow), that caveat
+    is preserved rather than downgraded to the describe-only marker -- the
+    description PATCH replaces the whole field, so re-describing must not silently
+    drop a food-safety disclaimer the recipe once had (#190).
+
+    Any known marker Gemini echoed into ``generated`` (it is shown the existing
+    description as context) is stripped first so the marker appears exactly once.
+    """
+    ai_recipe = i18n.t("disclaimer.ai_recipe")
+    ai_description = i18n.t("disclaimer.ai_description")
+    body = generated
+    for known in (ai_recipe, ai_description):
+        body = body.replace(known, "")
+    marker = ai_recipe if ai_recipe in original else ai_description
+    return f"{body.strip()}\n\n{marker}".strip()
 
 
 def _describe_prompt(batch: list, floor: int, max_text: int) -> str:
@@ -109,9 +137,7 @@ def _describe_prompt(batch: list, floor: int, max_text: int) -> str:
     recipe (index, name, category, ingredients, steps, existing description)."""
     parts = [i18n.t("prompt.describe_instructions", floor=floor, max=max_text)]
     for i, recipe in enumerate(batch, 1):
-        categories = ", ".join(
-            c.get("name", "") for c in recipe.get("recipeCategory", [])
-            if isinstance(c, dict) and c.get("name"))
+        categories = ", ".join(category_names(recipe))
         parts.append(i18n.t(
             "prompt.describe_recipe", index=i, name=recipe.get("name", ""),
             category=categories or "-",
@@ -126,69 +152,59 @@ def _gemini_describe_batch(ctx: _DescribeCtx, batch: list):
     or its validation fails (the batch is then skipped with a warning)."""
     floor = generation_floor(ctx.min_text, ctx.max_text)
     contents = _describe_prompt(batch, floor, ctx.max_text)
-    try:
-        # prompt.describe_system tells Gemini to answer in the recipe's OWN
-        # language rather than the active --lang. For a mixed-language library
-        # this is deliberately more robust than a hard active-language pin -- a
-        # Norwegian recipe stays Norwegian even in an English UI session
-        # (documented-intentional, #84).
-        text = _gemini_generate_text(
-            ctx.model, contents, list[RecipeDescription], 0.7,
-            system_key="prompt.describe_system")
-        items = TypeAdapter(list[RecipeDescription]).validate_json(text)
-    except (MealieToolError, ValueError) as exc:
-        print(i18n.t("describe.batch_warn", error=exc) + error_detail(exc),
-              file=sys.stderr)
+    # prompt.describe_system tells Gemini to answer in the recipe's OWN language
+    # rather than the active --lang. For a mixed-language library this is
+    # deliberately more robust than a hard active-language pin -- a Norwegian
+    # recipe stays Norwegian even in an English UI session (documented-
+    # intentional, #84).
+    items = run_gemini_batch(
+        lambda: _gemini_generate_text(
+            ctx.model, contents, list[RecipeDescription], TEMP_CREATIVE,
+            system_key="prompt.describe_system"),
+        RecipeDescription, "describe.batch_warn")
+    if items is None:
         return None
     return [(item.index, item.text) for item in items]
 
 
-def _build_descriptions(ctx: _DescribeCtx, candidates: list) -> list:
+def _build_plans(ctx: _DescribeCtx, candidates: list) -> list:
     """Fetch each candidate in batches, re-check it is still under-described on
     the full recipe, ask Gemini, and build a DescriptionPlan per recipe that got
-    a non-empty suggestion. A batch whose call/parse fails is skipped."""
-    plans: list = []
-    for summaries in _chunks(candidates, ctx.batch_size):
-        batch: list = []
-        for summary in summaries:
-            try:
-                recipe = mealie_get_recipe(ctx.base, ctx.token, summary["slug"])
-            except MealieApiError as exc:
-                # A recipe deleted since the scan (404) or a transient network
-                # error drops only that recipe, preserving per-batch isolation.
-                print(i18n.t("describe.fetch_warn", slug=summary["slug"], error=exc)
-                      + error_detail(exc), file=sys.stderr)
-                continue
-            if is_under_described(recipe, ctx.min_text):
-                batch.append(recipe)
-        if not batch:
-            continue
-        pairs = _gemini_describe_batch(ctx, batch)
-        if pairs is None:
-            continue
+    a non-empty suggestion (via the shared build_batched_plans loop)."""
+    def expand(batch: list, pairs: list) -> list:
         slug_text = parse_batch_response(pairs, batch)
+        out: list = []
         for recipe in batch:
             text = (slug_text.get(recipe["slug"]) or "").strip()
             if not text:
                 continue
-            plans.append(DescriptionPlan(recipe["slug"], recipe.get("name", ""), text))
-    return plans
+            final = embed_description_marker(text, _recipe_description(recipe))
+            out.append(DescriptionPlan(recipe["slug"], recipe.get("name", ""), final))
+        return out
+
+    spec = BatchPlan(
+        # Idempotent read: retry a transient blip so the recipe is not dropped
+        # from the batch (#180).
+        fetch=lambda slug: with_retries(
+            lambda: mealie_get_recipe(ctx.base, ctx.token, slug)),
+        keep=lambda recipe: is_under_described(recipe, ctx.min_text),
+        gemini_batch=lambda batch: _gemini_describe_batch(ctx, batch),
+        expand=expand,
+        warn_key="describe.fetch_warn")
+    return build_batched_plans(candidates, ctx.batch_size, spec)
 
 
-def _apply(ctx: _DescribeCtx, plans: list) -> int:
-    """PATCH each plan's description onto its recipe (best-effort). Returns how
-    many were updated; a per-recipe failure -- including a transient connection
-    error, not just a Mealie rejection -- is reported and skipped, so one blip
-    never aborts the rest of the batch (mirrors merge_tags/fill_images)."""
-    applied = 0
-    for plan in plans:
-        try:
-            mealie_set_recipe_description(ctx.base, ctx.token, plan.slug, plan.text)
-            applied += 1
-        except MealieApiError as exc:
-            print(i18n.t("describe.apply_warn", slug=plan.slug, error=exc)
-                  + error_detail(exc), file=sys.stderr)
-    return applied
+def _apply_plans(ctx: _DescribeCtx, plans: list) -> int:
+    """PATCH each plan's description onto its recipe via the shared best-effort
+    apply loop; returns how many were updated. A per-recipe failure -- a
+    transient connection error, not just a Mealie rejection -- is reported and
+    skipped so one blip never aborts the rest of the batch (see
+    curation.apply_plans)."""
+    return apply_plans(
+        plans,
+        lambda plan: mealie_set_recipe_description(
+            ctx.base, ctx.token, plan.slug, plan.text),
+        "describe.apply_warn")
 
 
 def _preview(candidates: list) -> None:
@@ -200,55 +216,21 @@ def _preview(candidates: list) -> None:
                      count=sentence_count(_recipe_description(recipe))))
 
 
-def _confirm_batch(args, count: int) -> int | None:
-    """Confirmation gate. Returns None to proceed, 1 for a non-interactive run
-    without --yes (prints describe.noninteractive), 0 for an interactive decline
-    (prints describe.aborted). Mirrors merge_tags/fill_images."""
-    if args.yes:
-        return None
-    if not sys.stdin.isatty():
-        print(i18n.t("describe.noninteractive"), file=sys.stderr)
-        return 1
-    if not confirm(i18n.t("describe.confirm", count=count)):
-        print(i18n.t("describe.aborted"))
-        return 0
-    return None
-
-
-def run_describe_mode(args) -> int:
+def run_describe_mode(args: argparse.Namespace) -> int:
     """Describe mode entry: scan Mealie for under-described recipes, preview,
-    confirm once, then batched-generate + PATCH their descriptions. Returns the
-    process exit code."""
+    confirm once, then batched-generate + PATCH their descriptions (via the
+    shared run_batch_mode orchestration). Returns the process exit code."""
     base = mealie_base_url()
     token = require_env("MEALIE_API_TOKEN")
     model = resolve_text_model(args.model)
     ctx = _DescribeCtx(base, token, model, args.min_text, args.max_text,
                        args.batch_size)
-
-    print(i18n.t("describe.fetching"), file=sys.stderr)
-    recipes = mealie_list_recipes(base, token)
-    candidates = [r for r in recipes if is_under_described(r, args.min_text)]
-    print(i18n.t("describe.scanned", total=len(recipes), under=len(candidates)),
-          file=sys.stderr)
-    if args.limit is not None:
-        candidates = candidates[:args.limit]
-    if not candidates:
-        print(i18n.t("describe.none"))
-        return 0
-
-    _preview(candidates)
-    if args.dry_run:
-        print(i18n.t("dry_run.done"))
-        return 0
-
-    rc = _confirm_batch(args, len(candidates))
-    if rc is not None:
-        return rc
-
-    print(i18n.t("disclaimer.describe"), file=sys.stderr)
-    print(i18n.t("describe.analyzing", count=len(candidates), model=model),
-          file=sys.stderr)
-    plans = _build_descriptions(ctx, candidates)
-    applied = _apply(ctx, plans)
-    print(i18n.t("describe.done", count=applied))
-    return 0
+    return run_batch_mode(args, ctx, BatchMode(
+        key_prefix="describe",
+        # Idempotent read: retry a transient blip rather than aborting the run (#180).
+        fetch_recipes=lambda: with_retries(lambda: mealie_list_recipes(base, token)),
+        keep=lambda recipe: is_under_described(recipe, args.min_text),
+        preview=_preview,
+        build=_build_plans,
+        apply=_apply_plans,
+        confirm=confirm))

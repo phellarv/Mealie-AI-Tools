@@ -22,13 +22,24 @@ import i18n
 from recipe_core import ingredient_texts, instruction_texts
 
 
+def _fill_ingredient_checklist(selection: SelectionList, texts) -> None:
+    """Fill a SelectionList with an opt-in ingredient checklist.
+
+    Each option starts unticked (initial_state=False) and its value is the
+    ingredient's index in ``texts``; untrusted recipe text is escaped so a stray
+    '[' can't be read as Rich markup (#38). Shared by the cook, preview and
+    search ingredient checklists (#177)."""
+    for i, text in enumerate(texts):
+        selection.add_option((escape(text), i, False))
+
+
 class CookStepsScreen(Screen):
     """Walk a recipe's instructions, one highlighted step at a time (#18)."""
 
     BINDINGS = [
         ("escape", "app.pop_screen", i18n.t("tui.back")),
-        ("j", "next_step", ""),
-        ("k", "prev_step", ""),
+        ("j", "next_step", i18n.t("tui.cook.next_step")),
+        ("k", "prev_step", i18n.t("tui.cook.prev_step")),
     ]
 
     def __init__(self, recipe: dict) -> None:
@@ -113,8 +124,7 @@ class CookIngredientsScreen(Screen):
         """Populate the checklist from the recipe's ingredients (none ticked)."""
         selection = self.query_one("#cook-ingredients", SelectionList)
         # Opt-in: nothing starts ticked; the cook ticks items as they gather/prep.
-        for i, text in enumerate(ingredient_texts(self._recipe)):
-            selection.add_option((escape(text), i, False))  # untrusted -> escape markup (#38)
+        _fill_ingredient_checklist(selection, ingredient_texts(self._recipe))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Advance from the ingredient checklist to the step-by-step view."""

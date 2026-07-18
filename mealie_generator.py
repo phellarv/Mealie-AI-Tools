@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 import cli_common
 import i18n
@@ -29,14 +28,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--cuisine", help=i18n.t("cli.help.cuisine"))
     parser.add_argument("--ingredients", help=i18n.t("cli.help.ingredients"))
     parser.add_argument("--servings", help=i18n.t("cli.help.servings"))
-    cli_common.add_publish_args(parser)
+    cli_common.add_publish_args(parser, output_dir_help="cli.help.output_dir_generate")
+    cli_common.add_confirm_args(parser)
     cli_common.add_common_args(parser)
     return parser.parse_args(argv)
 
 
 def _main() -> int:
     args = parse_args(sys.argv[1:])
-    output_dir = Path(args.output_dir).resolve() if args.output_dir else Path.cwd()
+    output_dir = cli_common.resolve_output_dir(args)
     cli_common.bootstrap(args)
     _ensure_output_dir(output_dir)
     request_text = build_request_text(args)

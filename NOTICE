@@ -1,0 +1,30 @@
+Mealie-AI-Tools
+Copyright (c) 2026 Per-Arne Hellarvik
+
+This product is licensed under the MIT License; see the LICENSE file for the
+full text.
+
+Third-party notices
+===================
+
+This product depends on the third-party runtime libraries listed below, each
+distributed under its own license. The libraries are installed from PyPI (not
+vendored in this repository), and each package ships its own full license text
+in its installed distribution metadata. The runtime dependencies and their
+licenses are:
+
+  - google-genai    Apache License 2.0
+      https://github.com/googleapis/python-genai
+  - requests        Apache License 2.0
+      https://github.com/psf/requests
+  - pydantic        MIT License
+      https://github.com/pydantic/pydantic
+  - python-dotenv   BSD 3-Clause License
+      https://github.com/theskumar/python-dotenv
+  - textual         MIT License
+      https://github.com/Textualize/textual
+
+License texts:
+  - Apache License 2.0:      https://www.apache.org/licenses/LICENSE-2.0
+  - MIT License:             https://opensource.org/license/mit
+  - BSD 3-Clause License:    https://opensource.org/license/bsd-3-clause

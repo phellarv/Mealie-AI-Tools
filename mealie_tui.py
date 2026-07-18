@@ -15,9 +15,11 @@ thread with `call_from_thread`. Errors are shown in-UI and never crash the app.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -39,27 +41,29 @@ from mealie_api import (
     mealie_get_categories, mealie_get_recipe, mealie_get_shopping_lists,
     mealie_get_tags, mealie_get_tools, mealie_group_slug,
     mealie_search_recipes, mealie_set_recipe_tools, mealie_upload_image,
+    with_retries,
 )
-from cooking_tui import CookIngredientsScreen
+from cooking_tui import CookIngredientsScreen, _fill_ingredient_checklist
 # The leading-underscore helpers below (_default_shopping_list, _unique_sorted_names,
-# _cleanup_files, _prescan_flag) are deliberate SHARED internal API across the
-# CLI/TUI modules, not module-private -- treat a signature change as cross-module.
-# cli_pickers and recipe_core are leaf modules (neither imports mealie_tool or
-# mealie_tui), so importing from them here creates no cycle and everything can
-# be imported at top level.
+# _cleanup_files, _prescan_flag, _fill_ingredient_checklist) are deliberate SHARED
+# internal API across the CLI/TUI modules, not module-private -- treat a signature
+# change as cross-module.
+# cli_pickers, recipe_core and cli_common are leaf modules (none imports
+# mealie_tool or mealie_tui), so importing from them here creates no cycle and
+# everything can be imported at top level.
+from cli_common import _prescan_flag
 from cli_pickers import _default_shopping_list, _unique_sorted_names
 from config import (
-    MealieToolError, error_detail, load_config, mealie_base_url, require_env,
-    resolve_debug, resolve_env_file, set_debug,
+    MealieToolError, load_config, mealie_base_url, message_with_detail, require_env,
+    resolve_debug, resolve_env_file, set_debug, set_warn_sink,
 )
 from gemini import (
-    DEFAULT_ASPECT, build_image_prompt, generate_image, generate_recipes,
-    resolve_text_model,
+    ASPECT_CHOICES, DEFAULT_ASPECT, build_image_prompt, generate_image,
+    generate_recipes, resolve_text_model,
 )
 from recipe_core import (
-    _cleanup_files, _prescan_flag, ingredient_texts, load_style_examples,
+    _cleanup_files, ingredient_texts, load_style_examples,
     merge_keyword, remove_keyword, slugify, to_jsonld, validate_jsonld,
-    with_retries,
 )
 
 import i18n
@@ -75,7 +79,6 @@ i18n.set_lang(i18n.resolve_lang(_prescan_flag(sys.argv[1:], "--lang")))
 # Env-only: the TUI has no --debug flag (#69).
 set_debug(resolve_debug(False))
 
-ASPECTS = ["1:1", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
 NUM_CANDIDATES = 3
 
 
@@ -122,6 +125,21 @@ def recipe_to_markdown(r: dict) -> str:
     return "\n".join(lines)
 
 
+def _populate_shopping_list_select(select: Select, lists: list) -> dict[str, dict]:
+    """Populate a shopping-list Select from a Mealie lists payload; return the
+    id -> list map.
+
+    A list named like the active language's default ("Handleliste" /
+    "Shopping list") is preselected when it exists; otherwise the blank prompt
+    stays the default, so nothing is added unless the user picks a list. Shared
+    by PreviewScreen and SearchScreen (#174)."""
+    select.set_options([(escape(lst["name"]), lst["id"]) for lst in lists])
+    default = _default_shopping_list(lists)
+    if default is not None:
+        select.value = default["id"]
+    return {lst["id"]: lst for lst in lists}
+
+
 class _AppScreen(Screen):
     """Base screen that narrows ``self.app`` to :class:`MealieApp`.
 
@@ -143,12 +161,19 @@ class FormScreen(_AppScreen):
         ("ctrl+g", "generate", i18n.t("tui.generate")),
         ("s", "search", i18n.t("tui.shopping.open")),
     ]
-    # No auto-focus: the `s` binding opens the search screen, and a focused
-    # Input would swallow that keystroke (Textual routes printable keys to the
-    # focused widget before the screen bindings). With nothing focused the key
-    # reaches the binding; once the user clicks/tabs into a field, typing `s`
-    # works normally there.
-    AUTO_FOCUS = ""
+    # Auto-focus the first field so a user can start typing a request straight
+    # away; check_action() below scopes the bare-'s' search shortcut off while an
+    # Input is focused, so a request beginning with 's' types into the field
+    # rather than navigating to the search screen (#261).
+    AUTO_FOCUS = "#text"
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Disable the bare-'s' open-search shortcut while an Input has focus, so
+        the keystroke types into the field instead of hijacking navigation (and
+        the footer reflects that it is inactive) (#261)."""
+        if action == "search" and isinstance(self.app.focused, Input):
+            return False
+        return True
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -166,7 +191,7 @@ class FormScreen(_AppScreen):
             yield Label(i18n.t("tui.form.model_label"))
             yield Input(value=resolve_text_model(None), id="model")
             yield Label(i18n.t("tui.form.aspect_label"))
-            yield Select([(a, a) for a in ASPECTS], value=DEFAULT_ASPECT,
+            yield Select([(a, a) for a in ASPECT_CHOICES], value=DEFAULT_ASPECT,
                          allow_blank=False, id="aspect")
             with Horizontal(id="buttons"):
                 yield Button(i18n.t("tui.generate"), id="generate", variant="primary")
@@ -216,6 +241,13 @@ class FormScreen(_AppScreen):
         if event.button.id == "generate":
             self._do_generate()
 
+    def on_input_submitted(self) -> None:
+        """Pressing Enter in any form field starts generation, mirroring the
+        search screen's Enter-to-search so the two input screens behave the
+        same. Textual invokes the handler without the event when it is omitted;
+        any field's Enter should generate, so it is not needed (#269)."""
+        self._do_generate()
+
     def _do_generate(self) -> None:
         if self.query_one("#generate", Button).disabled:   # already generating
             return
@@ -239,12 +271,12 @@ class FormScreen(_AppScreen):
                 model, request_text, self.app.examples, NUM_CANDIDATES
             )
         except MealieToolError as exc:
-            self.app.call_from_thread(self._on_error, str(exc) + error_detail(exc))
+            self.app.call_from_thread(self._on_error, message_with_detail(None, exc))
             return
         # pylint: disable-next=broad-exception-caught
         except Exception as exc:  # noqa: BLE001 -- never crash the app
             self.app.call_from_thread(
-                self._on_error, i18n.t("tui.unexpected_error", error=exc) + error_detail(exc))
+                self._on_error, message_with_detail("tui.unexpected_error", exc))
             return
         self.app.call_from_thread(
             self._on_generated, candidates, name_override, str(aspect)
@@ -437,10 +469,8 @@ class PreviewScreen(_AppScreen):
     def _populate_shopping_ingredients(self) -> None:
         selection = self.query_one("#shopping-ingredients", SelectionList)
         selection.clear_options()
-        # value == the ingredient's index in ingredient_texts(jsonld). Opt-in:
-        # nothing starts selected (initial_state=False); the user ticks what to add.
-        for i, text in enumerate(ingredient_texts(self.state.jsonld)):
-            selection.add_option((escape(text), i, False))
+        # value == the ingredient's index in ingredient_texts(jsonld).
+        _fill_ingredient_checklist(selection, ingredient_texts(self.state.jsonld))
 
     def _threaded_load(self, getter, apply) -> None:
         """Fetch via getter(base, token) off-thread (best-effort) and marshal the
@@ -513,16 +543,9 @@ class PreviewScreen(_AppScreen):
 
     def _apply_shopping_lists(self, lists: list) -> None:
         # value == shopping-list id; resolved back to the name via
-        # _shopping_lists at upload time. A list named like the language default
-        # ("Handleliste" / "Shopping list") is preselected when it exists;
-        # otherwise the blank prompt stays the default, so nothing is added
-        # unless the user picks a list.
-        self._shopping_lists = {lst["id"]: lst for lst in lists}
-        select = self.query_one("#shopping-list", Select)
-        select.set_options([(escape(lst["name"]), lst["id"]) for lst in lists])
-        default = _default_shopping_list(lists)
-        if default is not None:
-            select.value = default["id"]
+        # _shopping_lists at upload time.
+        self._shopping_lists = _populate_shopping_list_select(
+            self.query_one("#shopping-list", Select), lists)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         """Persist an edited category or cuisine to the recipe file and preview."""
@@ -722,7 +745,7 @@ class UploadScreen(_AppScreen):
             _cleanup_files([image], on_line=self._log)
         # pylint: disable-next=broad-exception-caught
         except Exception as exc:  # noqa: BLE001 -- best-effort image step
-            self._log(i18n.t("tui.log.image_warn", error=exc) + error_detail(exc))
+            self._log(message_with_detail("tui.log.image_warn", exc))
 
     @work(thread=True, exclusive=True)
     def _upload(self) -> None:
@@ -760,7 +783,7 @@ class UploadScreen(_AppScreen):
                                      value=", ".join(t["name"] for t in s.tools)))
                 # pylint: disable-next=broad-exception-caught
                 except Exception as exc:  # noqa: BLE001 -- best-effort tools step
-                    self._log(i18n.t("tui.log.tools_warn", error=exc) + error_detail(exc))
+                    self._log(message_with_detail("tui.log.tools_warn", exc))
 
             self._upload_image(s, base, token, created)
 
@@ -768,17 +791,17 @@ class UploadScreen(_AppScreen):
 
             self._finish(url)
         except MealieResponseError as exc:
-            self._log(i18n.t("tui.log.mealie_error", error=exc) + error_detail(exc))
+            self._log(message_with_detail("tui.log.mealie_error", exc))
             self._finish(None)
         except (MealieConnectionError, MealieApiError) as exc:
-            self._log(i18n.t("tui.log.network_error", error=exc) + error_detail(exc))
+            self._log(message_with_detail("tui.log.network_error", exc))
             self._finish(None)
         except MealieToolError as exc:
-            self._log(str(exc) + error_detail(exc))
+            self._log(message_with_detail(None, exc))
             self._finish(None)
         # pylint: disable-next=broad-exception-caught
         except Exception as exc:  # noqa: BLE001 -- last-resort guard
-            self._log(i18n.t("tui.unexpected_error", error=exc) + error_detail(exc))
+            self._log(message_with_detail("tui.unexpected_error", exc))
             self._finish(None)
 
 
@@ -872,7 +895,7 @@ class SearchScreen(_AppScreen):
             group = mealie_group_slug(base, token)
         # pylint: disable-next=broad-exception-caught
         except Exception as exc:  # noqa: BLE001 -- best-effort, never crashes
-            self._log(i18n.t("tui.unexpected_error", error=exc) + error_detail(exc))
+            self._log(message_with_detail("tui.unexpected_error", exc))
             return
         self.app.call_from_thread(self._apply_results, hits, base, group)
 
@@ -907,7 +930,7 @@ class SearchScreen(_AppScreen):
             lists = mealie_get_shopping_lists(base, token)
         # pylint: disable-next=broad-exception-caught
         except Exception as exc:  # noqa: BLE001 -- best-effort, never crashes
-            self._log(i18n.t("tui.unexpected_error", error=exc) + error_detail(exc))
+            self._log(message_with_detail("tui.unexpected_error", exc))
             return
         self.app.call_from_thread(self._apply_recipe, recipe, lists)
 
@@ -916,16 +939,10 @@ class SearchScreen(_AppScreen):
         self._ingredients = ingredient_texts(recipe)
         selection = self.query_one("#shopping-ingredients", SelectionList)
         selection.clear_options()
-        # value == index into self._ingredients. Opt-in: nothing starts selected
-        # (initial_state=False); the user ticks what to add.
-        for i, text in enumerate(self._ingredients):
-            selection.add_option((escape(text), i, False))
-        self._shopping_lists = {lst["id"]: lst for lst in lists}
-        select = self.query_one("#shopping-list", Select)
-        select.set_options([(escape(lst["name"]), lst["id"]) for lst in lists])
-        default = _default_shopping_list(lists)
-        if default is not None:
-            select.value = default["id"]
+        # value == index into self._ingredients.
+        _fill_ingredient_checklist(selection, self._ingredients)
+        self._shopping_lists = _populate_shopping_list_select(
+            self.query_one("#shopping-list", Select), lists)
 
     # ---- add selected ingredients to the chosen list ---- #
     def _do_add(self) -> None:
@@ -947,7 +964,7 @@ class SearchScreen(_AppScreen):
             token = require_env("MEALIE_API_TOKEN")
         # pylint: disable-next=broad-exception-caught
         except Exception as exc:  # noqa: BLE001 -- best-effort, never crashes
-            self._log(i18n.t("tui.unexpected_error", error=exc) + error_detail(exc))
+            self._log(message_with_detail("tui.unexpected_error", exc))
             return
         added = 0
         for note in items:
@@ -956,7 +973,7 @@ class SearchScreen(_AppScreen):
                 added += 1
             # pylint: disable-next=broad-exception-caught
             except Exception as exc:  # noqa: BLE001 -- best-effort per item
-                self._log(i18n.t("tui.log.shopping_warn", error=exc) + error_detail(exc))
+                self._log(message_with_detail("tui.log.shopping_warn", exc))
         if added:
             name = self._shopping_lists.get(list_id, {}).get("name", "")
             self._log(i18n.t("tui.log.shopping_ok", count=added, list=name))
@@ -1006,8 +1023,23 @@ class MealieApp(App):
     def get_default_screen(self) -> Screen:
         return FormScreen()
 
+    def _surface_config_warning(self, message: str) -> None:
+        """Warn sink installed for config (the insecure-URL notice): surface the
+        warning in-app instead of a raw stderr write that would corrupt the
+        Textual screen (#225). mealie_base_url is called from thread workers, so
+        marshal the notification onto the UI thread when off it."""
+        self.status_lines.append(message)
+        if threading.current_thread() is threading.main_thread():
+            self.notify(message, severity="warning", timeout=8)
+        else:
+            self.call_from_thread(self.notify, message,
+                                  severity="warning", timeout=8)
+
     def on_mount(self) -> None:
-        """Load config and style examples; warn if the Gemini API key is missing."""
+        """Load config and style examples; warn if the Gemini API key is missing.
+        Route config warnings through the app so the insecure-URL notice reaches
+        the app log rather than corrupting the screen (#225)."""
+        set_warn_sink(self._surface_config_warning)
         load_config(resolve_env_file(_prescan_flag(sys.argv[1:], "--env-file")))
         self.examples = load_style_examples(self.output_dir)
         if not os.environ.get("GOOGLE_AI_API_KEY"):
@@ -1018,7 +1050,20 @@ class MealieApp(App):
 
 
 def main() -> None:
-    """Run the Textual TUI."""
+    """Run the Textual TUI.
+
+    ``--help``/``-h`` prints usage and exits WITHOUT launching the full-screen
+    app, so the packaged ``mealie-tui`` console script can be smoke-tested at
+    release the same cheap way as the other two commands (#250). The active
+    language was already resolved at import time (see the module-scope bootstrap
+    above), so the help text is translated. ``--lang`` / ``--env-file`` are
+    honoured there too; they are declared here only so ``--help`` documents them
+    and an unknown flag is rejected rather than silently launching the UI."""
+    parser = argparse.ArgumentParser(
+        prog="mealie-tui", description=i18n.t("cli.description.tui"))
+    parser.add_argument("--lang", help=i18n.t("cli.help.lang"))
+    parser.add_argument("--env-file", help=i18n.t("cli.help.env_file"))
+    parser.parse_args(sys.argv[1:])
     MealieApp().run()
 
 

@@ -1,16 +1,16 @@
 [project]
 name = "mealie-tool"
-version = "1.1.1"
+version = "1.2.0"
 description = "Generate schema.org recipes with Google Gemini and publish them (with an AI-generated image) to Mealie, in a selectable language."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Per-Arne Hellarvik", email = "duckboot@gmail.com" }]
 requires-python = ">=3.10"
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -27,7 +27,7 @@ dependencies = [
     "requests>=2.31,<3",
     "python-dotenv>=1.0.0,<2",
     "pydantic>=2.0,<3",
-    "textual>=1.0,<9",
+    "textual>=8,<9",
 ]
 
 [project.scripts]
@@ -61,10 +61,11 @@ py-version = "3.10"
 [tool.pylint.basic]
 # Deliberately lowercase, reassignable module-level globals (mutated via
 # `global`): _active_lang (i18n.set_lang), _insecure_url_warned
-# (mealie_tool.mealie_base_url, a once-per-process warn flag), and _debug
-# (config.set_debug, the process-wide debug flag, #69). snake_case is correct
-# for these, so whitelist the names instead of turning off invalid-name.
-good-names-rgxs = "^(_active_lang|_insecure_url_warned|_debug)$"
+# (mealie_tool.mealie_base_url, a once-per-process warn flag), _debug
+# (config.set_debug, the process-wide debug flag, #69), and _warn_sink
+# (config.set_warn_sink, the settable one-time-warning sink, #225). snake_case is
+# correct for these, so whitelist the names instead of turning off invalid-name.
+good-names-rgxs = "^(_active_lang|_insecure_url_warned|_debug|_warn_sink)$"
 
 [tool.pylint.format]
 # mealie_tui.py aggregates every Textual screen of a single interactive app, so
@@ -74,8 +75,9 @@ good-names-rgxs = "^(_active_lang|_insecure_url_warned|_debug)$"
 max-module-lines = 1200
 
 [tool.pylint.design]
-# choose_category / choose_cuisine_tag (cli_pickers.py) are guard-clause pickers
-# that legitimately sit one over the default of 6 return statements. The other
+# _choose_organizer (cli_pickers.py, the shared picker behind choose_category /
+# choose_cuisine_tag) is a guard-clause picker that legitimately sits one over
+# the default of 6 return statements. The other
 # design limits (max-branches, max-bool-expr, max-locals, max-statements) stay at
 # their defaults so genuinely oversized functions are still flagged. (Before the
 # #88 CLI split, _main and _reject_mode_conflicts needed higher branch/bool-expr
@@ -102,6 +104,20 @@ build-backend = "hatchling.build"
 
 # Top-level single-file modules plus the language catalogs shipped in the wheel.
 # lang/*.json land next to the modules, where i18n.py locates them via
-# Path(__file__).parent / "lang".
+# Path(__file__).parent / "lang". .env.example ships too so a pip-install-only
+# user (who never runs install.sh's seeding step) still has a config template to
+# copy to ~/.config/Mealie-AI-Tools/.env (#241).
 [tool.hatch.build.targets.wheel]
-include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "recipe_core.py", "publish.py", "retag.py", "merge_tags.py", "fill_images.py", "describe.py", "audit.py", "transform.py", "complete.py", "cli_common.py", "mealie_generator.py", "lang/*.json"]
+include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "recipe_core.py", "publish.py", "retag.py", "merge_tags.py", "fill_images.py", "describe.py", "audit.py", "transform.py", "complete.py", "cli_common.py", "curation.py", "mealie_generator.py", "lang/*.json", ".env.example", "NOTICE"]
+
+# The sdist ships the same allow-listed payload as the wheel (top-level modules +
+# lang catalogs), NOT the whole tree. Without an explicit include, hatchling's
+# default sdist sweeps in everything -- tests, docs/, dev scripts, and local
+# .claude/ + .superpowers/ working state -- which contradicts the distribution
+# intent and leaks internal planning docs from any local `uv build` (#194).
+# hatchling additionally force-includes the metadata files it needs
+# (pyproject.toml, the README, and the LICENSE named by license-files), so those
+# are present without being listed here. Kept in lockstep with the wheel include
+# by test_sdist_include_mirrors_wheel_include.
+[tool.hatch.build.targets.sdist]
+include = ["mealie_tool.py", "mealie_tui.py", "mealie_api.py", "cli_pickers.py", "cooking_tui.py", "i18n.py", "config.py", "gemini.py", "recipe_core.py", "publish.py", "retag.py", "merge_tags.py", "fill_images.py", "describe.py", "audit.py", "transform.py", "complete.py", "cli_common.py", "curation.py", "mealie_generator.py", "lang/*.json", ".env.example", "NOTICE"]

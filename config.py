@@ -22,6 +22,33 @@ class MealieToolError(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# Image formats (single source for the generate/upload mime<->ext lookups) (#191)
+# --------------------------------------------------------------------------- #
+
+# Canonical image formats the tools generate (Gemini) and upload (Mealie), kept
+# here -- the leaf both gemini and mealie_api import -- so the two inverse
+# lookups below cannot drift; adding a format (e.g. AVIF) is one line here.
+# Each entry is (mime, canonical extension WITHOUT dot, alternate spellings).
+# NOT derived from the mimetypes module, which can hand back ".jpe" for
+# image/jpeg on some systems.
+IMAGE_FORMATS = (
+    ("image/png", "png", ()),
+    ("image/jpeg", "jpg", ("jpeg",)),
+    ("image/webp", "webp", ()),
+)
+
+# mime -> file extension WITH leading dot (the generate side, gemini).
+EXT_BY_MIME = {mime: f".{ext}" for mime, ext, _alts in IMAGE_FORMATS}
+# file extension (no dot) -> mime, every accepted spelling (the upload side,
+# mealie_api).
+MIME_BY_EXT = {
+    spelling: mime
+    for mime, ext, alts in IMAGE_FORMATS
+    for spelling in (ext, *alts)
+}
+
+
+# --------------------------------------------------------------------------- #
 # Debug mode (verbose error detail) (#69)
 # --------------------------------------------------------------------------- #
 
@@ -71,6 +98,25 @@ def error_detail(exc: BaseException) -> str:
     if body:
         parts.append(f"body: {body}")
     return "\n[debug] " + " | ".join(parts) if parts else ""
+
+
+def message_with_detail(key: str | None, exc: BaseException | None = None,
+                        **kwargs: object) -> str:
+    """Compose a user-facing message and its debug error_detail in one place, so
+    the ``+ error_detail(exc)`` suffix can never be forgotten at a warn/error
+    site (#189).
+
+    ``key`` selects an i18n catalog string (formatted with ``kwargs``; the
+    exception is also exposed to it as ``{error}``, which catalog strings without
+    that placeholder ignore); ``key=None`` uses ``str(exc)`` as the message.
+    ``error_detail(exc)`` is appended whenever an exception is given -- and is
+    itself empty unless debug mode is on.
+    """
+    if exc is None:
+        return i18n.t(key, **kwargs) if key is not None else ""
+    kwargs.setdefault("error", exc)
+    message = i18n.t(key, **kwargs) if key is not None else str(exc)
+    return message + error_detail(exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -139,11 +185,36 @@ def require_env(name: str) -> str:
 _insecure_url_warned = False
 
 
+def _default_warn(message: str) -> None:
+    """Default warn sink: write to stderr (the CLI/script behaviour)."""
+    print(message, file=sys.stderr)
+
+
+# One-time warnings (currently only the insecure-URL notice) go through this
+# settable sink instead of a hardcoded stderr print, so the Textual TUI can
+# redirect them into its own log. A raw stderr write from a background worker
+# thread would otherwise land on the terminal the full-screen app owns and
+# corrupt the rendered screen (#225).
+_warn_sink = _default_warn
+
+
+def set_warn_sink(sink) -> None:
+    """Route one-time warnings through ``sink`` (a ``str -> None`` callable)
+    instead of the default stderr print. The TUI sets this in its bootstrap so a
+    warning surfaced from a worker thread reaches the app log rather than
+    scrambling the Textual screen (#225). Pass ``None`` to restore the default
+    stderr sink."""
+    global _warn_sink
+    _warn_sink = _default_warn if sink is None else sink
+
+
 def mealie_base_url() -> str:
     """Resolve MEALIE_URL (trailing slash trimmed). An http:// endpoint sends the
     API token over the wire in cleartext, so it is refused unless the user has
     opted in via MEALIE_ALLOW_HTTP (then warned once) -- credentials are never
-    sent unencrypted by accident (#38). Shared by the CLI and TUI (#31)."""
+    sent unencrypted by accident (#38). Shared by the CLI and TUI (#31). The
+    warning goes through the settable warn sink so a TUI session can capture it
+    in-app rather than corrupting its screen (#225)."""
     global _insecure_url_warned
     base = require_env("MEALIE_URL").rstrip("/")
     if not base.lower().startswith("https://"):  # scheme is case-insensitive (RFC 3986) (#101)
@@ -151,6 +222,6 @@ def mealie_base_url() -> str:
         if allow_http not in _TRUTHY:
             raise MealieToolError(i18n.t("cli.http_blocked", url=base))
         if not _insecure_url_warned:
-            print(i18n.t("cli.insecure_url", url=base), file=sys.stderr)
+            _warn_sink(i18n.t("cli.insecure_url", url=base))
             _insecure_url_warned = True
     return base

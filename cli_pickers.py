@@ -19,7 +19,7 @@ import re
 import sys
 
 import i18n
-from config import error_detail
+from config import message_with_detail
 from mealie_api import (
     mealie_get_categories, mealie_get_shopping_lists, mealie_get_tags,
     mealie_get_tools, mealie_group_slug, mealie_search_recipes,
@@ -121,23 +121,27 @@ def _default_shopping_list(lists: list[dict]) -> dict | None:
     return None
 
 
-def choose_category(base: str, token: str, current: str) -> str:
-    """Let the user pick a category from Mealie's existing list interactively.
+def _choose_organizer(fetch, base: str, token: str, current: str,
+                      prefix: str) -> str:
+    """Shared single-pick organizer prompt behind ``choose_category`` and
+    ``choose_cuisine_tag`` (mirrors the TUI's ``_apply_organizer_options``).
 
-    Defaults to a case-insensitive match against `current` (Gemini's raw
-    suggestion) so accepting the default reuses Mealie's canonical name
-    instead of letting near-duplicate categories (e.g. "middag" vs "Middag")
-    pile up. Falls back to `current` on any fetch error, an empty category
-    list, or invalid/EOF input.
+    Fetches the existing names via `fetch`, defaults to a case-insensitive
+    match against `current` (Gemini's raw suggestion) so accepting the default
+    reuses Mealie's canonical spelling instead of letting near-duplicates (e.g.
+    "middag" vs "Middag") pile up, and returns the pick. Every user-facing
+    string is read from the ``<prefix>.*`` catalog keys, so the two pickers
+    differ only in `fetch` and `prefix`. Falls back to `current` on any fetch
+    error, an empty list, or invalid/EOF input -- it never blocks the upload.
     """
     try:
-        categories = mealie_get_categories(base, token)
+        items = fetch(base, token)
     # pylint: disable-next=broad-exception-caught
     except Exception as exc:  # noqa: BLE001 -- best-effort, never blocks upload
-        print(i18n.t("category.fetch_error", error=exc) + error_detail(exc), file=sys.stderr)
+        print(message_with_detail(f"{prefix}.fetch_error", exc), file=sys.stderr)
         return current
 
-    names = _unique_sorted_names(categories)
+    names = _unique_sorted_names(items)
     if not names:
         return current
 
@@ -149,13 +153,14 @@ def choose_category(base: str, token: str, current: str) -> str:
             is_new = False
             break
 
-    print(i18n.t("category.choose_header"))
-    label = i18n.t("quote", value=default) + (i18n.t("category.new_suffix") if is_new else "")
+    print(i18n.t(f"{prefix}.choose_header"))
+    label = i18n.t("quote", value=default) + (
+        i18n.t(f"{prefix}.new_suffix") if is_new else "")
     print(i18n.t("choice.keep", label=label))
     for i, name in enumerate(names, 1):
         print(f"  {i}. {name}")
     try:
-        answer = input(i18n.t("category.prompt", max=len(names))).strip()
+        answer = input(i18n.t(f"{prefix}.prompt", max=len(names))).strip()
     except EOFError:
         return default
     if not answer:
@@ -168,6 +173,15 @@ def choose_category(base: str, token: str, current: str) -> str:
             return names[idx - 1]
     print(i18n.t("choice.invalid", label=i18n.t("quote", value=default)), file=sys.stderr)
     return default
+
+
+def choose_category(base: str, token: str, current: str) -> str:
+    """Let the user pick a category from Mealie's existing list interactively.
+
+    A thin wrapper over ``_choose_organizer`` sourced from Mealie's categories;
+    see that helper for the default-matching and fallback behaviour.
+    """
+    return _choose_organizer(mealie_get_categories, base, token, current, "category")
 
 
 def choose_cuisine_tag(base: str, token: str, current: str) -> str:
@@ -178,44 +192,7 @@ def choose_cuisine_tag(base: str, token: str, current: str) -> str:
     cuisine is represented as a Tag (see `merge_keyword`, which folds the
     chosen name into `keywords` so Mealie's importer creates/reuses it).
     """
-    try:
-        tags = mealie_get_tags(base, token)
-    # pylint: disable-next=broad-exception-caught
-    except Exception as exc:  # noqa: BLE001 -- best-effort, never blocks upload
-        print(i18n.t("cuisine.fetch_error", error=exc) + error_detail(exc), file=sys.stderr)
-        return current
-
-    names = _unique_sorted_names(tags)
-    if not names:
-        return current
-
-    default = current
-    is_new = True
-    for name in names:
-        if name.lower() == current.lower():
-            default = name
-            is_new = False
-            break
-
-    print(i18n.t("cuisine.choose_header"))
-    label = i18n.t("quote", value=default) + (i18n.t("cuisine.new_suffix") if is_new else "")
-    print(i18n.t("choice.keep", label=label))
-    for i, name in enumerate(names, 1):
-        print(f"  {i}. {name}")
-    try:
-        answer = input(i18n.t("cuisine.prompt", max=len(names))).strip()
-    except EOFError:
-        return default
-    if not answer:
-        return default
-    if re.fullmatch(r"\d+", answer):
-        idx = int(answer)
-        if idx == 0:
-            return default
-        if 1 <= idx <= len(names):
-            return names[idx - 1]
-    print(i18n.t("choice.invalid", label=i18n.t("quote", value=default)), file=sys.stderr)
-    return default
+    return _choose_organizer(mealie_get_tags, base, token, current, "cuisine")
 
 
 def choose_tools(base: str, token: str) -> list[dict]:
@@ -232,7 +209,7 @@ def choose_tools(base: str, token: str) -> list[dict]:
         tools = mealie_get_tools(base, token)
     # pylint: disable-next=broad-exception-caught
     except Exception as exc:  # noqa: BLE001 -- best-effort, never blocks upload
-        print(i18n.t("tools.fetch_error", error=exc) + error_detail(exc), file=sys.stderr)
+        print(message_with_detail("tools.fetch_error", exc), file=sys.stderr)
         return []
 
     by_name: dict[str, dict] = {}
@@ -330,7 +307,7 @@ def choose_shopping_list(base: str, token: str) -> dict | None:
         lists = mealie_get_shopping_lists(base, token)
     # pylint: disable-next=broad-exception-caught
     except Exception as exc:  # noqa: BLE001 -- best-effort, never blocks upload
-        print(i18n.t("shopping.lists_fetch_error", error=exc) + error_detail(exc), file=sys.stderr)
+        print(message_with_detail("shopping.lists_fetch_error", exc), file=sys.stderr)
         return None
     if not lists:
         print(i18n.t("shopping.no_lists"), file=sys.stderr)

@@ -26,12 +26,13 @@ import i18n
 from audit import run_audit_mode
 from cli_pickers import choose_ingredients, choose_recipe, choose_shopping_list
 from complete import run_complete_mode
-from config import error_detail, mealie_base_url, require_env
+from config import mealie_base_url, message_with_detail, require_env
 from describe import run_describe_mode
 from fill_images import run_fill_images_mode
 from gemini import DEFAULT_ASPECT, DEFAULT_TEXT_MODEL
 from mealie_api import MealieApiError, mealie_add_shopping_item, mealie_get_recipe
 from merge_tags import run_merge_tags_mode
+from publish import add_notes_to_shopping_list
 from recipe_core import ingredient_texts
 from retag import run_retag_mode
 from transform import run_transform_mode
@@ -40,6 +41,7 @@ DEFAULT_MIN_TAGS = 5
 DEFAULT_MAX_TAGS = 8
 DEFAULT_BATCH_SIZE = 10
 DEFAULT_SIMILARITY = 0.8
+DEFAULT_MAX_TEXT = 4
 
 
 # --------------------------------------------------------------------------- #
@@ -65,15 +67,22 @@ def _add_min_tags(parser: argparse.ArgumentParser) -> None:
                         help=i18n.t("cli.help.min_tags", default=DEFAULT_MIN_TAGS))
 
 
-def _sub(subparsers, common: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
+def _sub(subparsers, common: argparse.ArgumentParser, name: str,
+         *, confirm: bool = False, cleanup: bool = False) -> argparse.ArgumentParser:
     """Create a subparser named `name`, sharing the common flags and reusing the
     mode's existing cli.help.* one-liner for both its list entry and its own
-    --help description."""
+    --help description. ``confirm=True`` adds the --yes/--dry-run pair, given
+    only to the modes that honour it -- not the read-only audit or the
+    interactive-only search (#257); ``cleanup=True`` picks the cleanup-mode
+    wording for that pair (#253)."""
     summary = i18n.t("cli.help." + name.replace("-", "_"))
-    return subparsers.add_parser(
+    parser = subparsers.add_parser(
         name, parents=[common], help=summary, description=summary,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    if confirm:
+        cli_common.add_confirm_args(parser, cleanup=cleanup)
+    return parser
 
 
 # --------------------------------------------------------------------------- #
@@ -82,29 +91,29 @@ def _sub(subparsers, common: argparse.ArgumentParser, name: str) -> argparse.Arg
 
 def _build_search(subparsers, common):
     parser = _sub(subparsers, common, "search")
-    parser.add_argument("search", metavar="QUERY", help=i18n.t("cli.help.search"))
+    parser.add_argument("search", metavar="QUERY", help=i18n.t("cli.help.arg_query"))
     parser.set_defaults(func=_run_search_mode)
 
 
 def _build_adapt(subparsers, common):
-    parser = _sub(subparsers, common, "adapt")
-    parser.add_argument("adapt", metavar="SLUG", help=i18n.t("cli.help.adapt"))
+    parser = _sub(subparsers, common, "adapt", confirm=True)
+    parser.add_argument("adapt", metavar="SLUG", help=i18n.t("cli.help.arg_adapt"))
     parser.add_argument("--diet", help=i18n.t("cli.help.diet"))
     cli_common.add_publish_args(parser)
     parser.set_defaults(func=run_transform_mode, remix=None, translate=None)
 
 
 def _build_remix(subparsers, common):
-    parser = _sub(subparsers, common, "remix")
-    parser.add_argument("remix", metavar="SLUG", help=i18n.t("cli.help.remix"))
+    parser = _sub(subparsers, common, "remix", confirm=True)
+    parser.add_argument("remix", metavar="SLUG", help=i18n.t("cli.help.arg_remix"))
     parser.add_argument("--into", help=i18n.t("cli.help.into"))
     cli_common.add_publish_args(parser)
     parser.set_defaults(func=run_transform_mode, adapt=None, translate=None)
 
 
 def _build_translate(subparsers, common):
-    parser = _sub(subparsers, common, "translate")
-    parser.add_argument("translate", metavar="SLUG", help=i18n.t("cli.help.translate"))
+    parser = _sub(subparsers, common, "translate", confirm=True)
+    parser.add_argument("translate", metavar="SLUG", help=i18n.t("cli.help.arg_translate"))
     cli_common.add_publish_args(parser)
     parser.set_defaults(func=run_transform_mode, adapt=None, remix=None)
 
@@ -117,7 +126,7 @@ def _build_audit(subparsers, common):
 
 
 def _build_retag(subparsers, common):
-    parser = _sub(subparsers, common, "retag")
+    parser = _sub(subparsers, common, "retag", confirm=True, cleanup=True)
     _add_min_tags(parser)
     parser.add_argument("--max-tags", type=int, default=DEFAULT_MAX_TAGS,
                         help=i18n.t("cli.help.max_tags", default=DEFAULT_MAX_TAGS))
@@ -128,14 +137,14 @@ def _build_retag(subparsers, common):
 
 
 def _build_merge_tags(subparsers, common):
-    parser = _sub(subparsers, common, "merge-tags")
+    parser = _sub(subparsers, common, "merge-tags", confirm=True, cleanup=True)
     parser.add_argument("--similarity", type=float, default=DEFAULT_SIMILARITY,
                         help=i18n.t("cli.help.similarity", default=DEFAULT_SIMILARITY))
     parser.set_defaults(func=run_merge_tags_mode)
 
 
 def _build_fill_images(subparsers, common):
-    parser = _sub(subparsers, common, "fill-images")
+    parser = _sub(subparsers, common, "fill-images", confirm=True, cleanup=True)
     parser.add_argument("--aspect", default=DEFAULT_ASPECT, choices=cli_common.ASPECT_CHOICES,
                         help=i18n.t("cli.help.aspect", default=DEFAULT_ASPECT))
     parser.add_argument("--output-dir", help=i18n.t("cli.help.output_dir"))
@@ -145,10 +154,10 @@ def _build_fill_images(subparsers, common):
 
 
 def _build_describe(subparsers, common):
-    parser = _sub(subparsers, common, "describe")
+    parser = _sub(subparsers, common, "describe", confirm=True, cleanup=True)
     parser.add_argument("--min-text", type=int, default=None, help=i18n.t("cli.help.min_text"))
-    parser.add_argument("--max-text", type=int, default=4,
-                        help=i18n.t("cli.help.max_text", default=4))
+    parser.add_argument("--max-text", type=int, default=DEFAULT_MAX_TEXT,
+                        help=i18n.t("cli.help.max_text", default=DEFAULT_MAX_TEXT))
     _add_batch_size(parser)
     _add_model(parser)
     _add_limit(parser)
@@ -156,7 +165,7 @@ def _build_describe(subparsers, common):
 
 
 def _build_complete(subparsers, common):
-    parser = _sub(subparsers, common, "complete")
+    parser = _sub(subparsers, common, "complete", confirm=True, cleanup=True)
     _add_batch_size(parser)
     _add_model(parser)
     _add_limit(parser)
@@ -179,7 +188,7 @@ MODE_NAMES = tuple(_MODE_BUILDERS)
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Per-mode value checks argparse can't express structurally. (--translate's
+    """Per-mode value checks argparse can't express structurally. (translate's
     target-language requirement stays in run_transform_mode: it reads MEALIE_LANG
     from .env, which is loaded after parse.)"""
     if args.mode == "adapt" and not args.diet:
@@ -215,7 +224,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def _run_search_mode(args) -> int:
+def _run_search_mode(args: argparse.Namespace) -> int:
     """Search Mealie recipes and present the matches with links (the recipe-
     search feature, #13). If the user picks one, add its (selected) ingredients
     to a chosen shopping list (#14). Presenting results without picking -- or
@@ -233,12 +242,15 @@ def _run_search_mode(args) -> int:
         chosen = choose_shopping_list(base, token)
         if not chosen:
             return 0
-        for note in selected:
-            mealie_add_shopping_item(base, token, chosen["id"], note)
     except MealieApiError as exc:
-        print(i18n.t("shopping.search_error", error=exc) + error_detail(exc), file=sys.stderr)
+        print(message_with_detail("shopping.search_error", exc), file=sys.stderr)
         return 1
-    print(i18n.t("shopping.added", count=len(selected), list=chosen["name"]))
+    # Add per item best-effort and report the true count: one failed item never
+    # aborts the loop nor misreports the run as failed while earlier items are
+    # already in Mealie (mirrors publish._add_to_shopping_list, #235).
+    add_notes_to_shopping_list(
+        chosen, selected,
+        lambda note: mealie_add_shopping_item(base, token, chosen["id"], note))
     return 0
 
 

@@ -40,6 +40,11 @@ def _catalog(lang: str) -> dict[str, str]:
             # A user- or contributor-added catalog with a JSON typo must not
             # crash every command with a raw traceback: warn and fall back to
             # an empty catalog, so t() drops through to the default/key (#106).
+            # This one warning stays hardcoded English on purpose: it fires while
+            # a catalog is failing to load, so the i18n machinery itself is the
+            # thing breaking here -- routing it through t() could re-enter
+            # _catalog (and can't be trusted to resolve). A documented bootstrap
+            # limitation (#260).
             print(f"Warning: could not parse language catalog '{path.name}': {exc}",
                   file=sys.stderr)
             _catalogs[lang] = {}
@@ -60,10 +65,11 @@ def resolve_lang(cli_lang: str | None, *, warn: bool = True) -> str:
     if lang in available_langs():
         return lang
     if warn and lang != DEFAULT_LANG:
-        print(
-            f"Warning: unknown language '{raw}', using '{DEFAULT_LANG}'.",
-            file=sys.stderr,
-        )
+        # Localizable, unlike the catalog-parse warning: we are falling back to
+        # the default catalog, which is loadable here, so a default-locale user
+        # who typos --lang sees this in their language like every other message
+        # (#260).
+        print(t("warn.unknown_lang", raw=raw, default=DEFAULT_LANG), file=sys.stderr)
     return DEFAULT_LANG
 
 

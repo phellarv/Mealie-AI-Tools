@@ -1,4 +1,4 @@
-"""Collection audit mode: --audit (collection-companion, Theme 3 anchor).
+"""Collection audit mode: audit (collection-companion, Theme 3 anchor).
 
 Read-only, deterministic completeness scan of the recipes already in Mealie.
 Scores each recipe on 8 field-presence dimensions and prints a worst-first
@@ -8,13 +8,16 @@ run_audit_mode wires them to the Mealie reads and the CLI output.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 
 import i18n
-from config import error_detail, mealie_base_url, require_env
+from config import mealie_base_url, message_with_detail, require_env
 from fill_images import is_missing_image
-from mealie_api import MealieApiError, mealie_get_recipe, mealie_list_recipes
-from recipe_core import instruction_texts
+from mealie_api import (
+    MealieApiError, mealie_get_recipe, mealie_list_recipes, with_retries,
+)
+from recipe_core import category_names, instruction_texts
 from retag import is_thin
 
 GAP_ORDER = [
@@ -26,9 +29,7 @@ DIMENSIONS = len(GAP_ORDER)
 
 def missing_category(recipe: dict) -> bool:
     """True if the recipe has no non-empty category name."""
-    return not any(
-        c.get("name") for c in recipe.get("recipeCategory", [])
-        if isinstance(c, dict))
+    return not category_names(recipe)
 
 
 def missing_times(recipe: dict) -> bool:
@@ -90,13 +91,15 @@ def tally(audited: list) -> dict:
     return counts
 
 
-def run_audit_mode(args) -> int:
+def run_audit_mode(args: argparse.Namespace) -> int:
     """Audit mode entry: scan every recipe, print a worst-first worklist of
     under-filled recipes plus a summary tally. Read-only. Returns 0."""
     base = mealie_base_url()
     token = require_env("MEALIE_API_TOKEN")
     print(i18n.t("audit.fetching"), file=sys.stderr)
-    summaries = mealie_list_recipes(base, token)
+    # Reads are idempotent, so retry a transient blip rather than aborting the
+    # whole scan (list) or silently dropping a recipe (per-recipe fetch) (#180).
+    summaries = with_retries(lambda: mealie_list_recipes(base, token))
     if args.limit is not None:
         summaries = summaries[:args.limit]
 
@@ -104,9 +107,9 @@ def run_audit_mode(args) -> int:
     for summary in summaries:
         slug = summary.get("slug", "")
         try:
-            full = mealie_get_recipe(base, token, slug)
+            full = with_retries(lambda s=slug: mealie_get_recipe(base, token, s))
         except MealieApiError as exc:
-            print(i18n.t("audit.fetch_warn", slug=slug, error=exc) + error_detail(exc),
+            print(message_with_detail("audit.fetch_warn", exc, slug=slug),
                   file=sys.stderr)
             continue
         audited.append((full, audit_recipe(full, args.min_tags)))

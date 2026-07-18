@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Install (or remove) the `mealie-generator` /
 # `mealie-tool` / `mealie-tui` commands as an isolated uv tool, and seed a
 # per-user config file. Repo-independent: once installed, the checkout is not
@@ -6,9 +6,21 @@
 set -euo pipefail
 
 # Repo root = the directory this script lives in (resolve symlinks so it works
-# even if install.sh itself is invoked via a link).
-SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
-REPO_DIR="$(dirname "$SCRIPT_PATH")"
+# even if install.sh itself is invoked via a link). GNU `readlink -f` is not
+# portable (BSD/macOS readlink has no -f), so walk the symlink chain by hand
+# with plain POSIX `readlink` + `cd -P`/`pwd`, which works on GNU, BSD/macOS and
+# busybox alike (#212).
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SCRIPT_SOURCE" ]; do
+    link_dir="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+    # A relative link target resolves against the link's own directory.
+    case "$SCRIPT_SOURCE" in
+        /*) : ;;
+        *)  SCRIPT_SOURCE="$link_dir/$SCRIPT_SOURCE" ;;
+    esac
+done
+REPO_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 
 # Per-user config dir: $XDG_CONFIG_HOME/Mealie-AI-Tools (default ~/.config/...).
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/Mealie-AI-Tools"
@@ -64,8 +76,18 @@ fi
 #    silently re-resolving) and pass it via --constraints, pinning every resolved
 #    dependency to exactly the locked version. Re-run after a `uv lock` bump to
 #    move versions forward deliberately.
+#
+#    --no-hashes: the exported constraints pin exact VERSIONS but drop the
+#    per-artifact hashes, so this install is version-reproducible, NOT
+#    integrity-verified — a compromised or misconfigured index/mirror serving a
+#    different artifact under the same pinned version would not be caught at
+#    install time. The hashes are dropped deliberately: `uv tool install
+#    --constraints` can fail when not every transitive dependency in the export
+#    carries a hash. Treat this as version-reproducible-only (#263).
 echo "Installing mealie-generator / mealie-tool / mealie-tui with uv tool ..."
-CONSTRAINTS="$(mktemp)"
+# Explicit template rooted at $TMPDIR: bare `mktemp` defaults a template on GNU
+# but BSD/macOS mktemp requires one, so this form works everywhere (#217).
+CONSTRAINTS="$(mktemp "${TMPDIR:-/tmp}/mealie-tools.XXXXXX")"
 trap 'rm -f "$CONSTRAINTS"' EXIT
 uv export --frozen --no-dev --no-emit-project --no-hashes \
     --project "$REPO_DIR" -o "$CONSTRAINTS"
@@ -76,7 +98,9 @@ uv tool install --force --constraints "$CONSTRAINTS" "$REPO_DIR"
 #    Mealie token and Gemini API key, so it (and its dir) must be owner-only —
 #    never world-/group-readable on a multi-user host (#20).
 mkdir -p "$CONFIG_DIR"
-chmod 700 "$CONFIG_DIR" 2>/dev/null || true
+if ! chmod 700 "$CONFIG_DIR" 2>/dev/null; then
+    echo "  ! Warning: could not set mode 0700 on $CONFIG_DIR — verify it is not group-/world-accessible." >&2
+fi
 if [ ! -e "$CONFIG_DIR/.env" ]; then
     # Subshell umask guarantees 0600 regardless of the caller's umask; the
     # explicit chmod is belt-and-suspenders.
@@ -86,9 +110,15 @@ if [ ! -e "$CONFIG_DIR/.env" ]; then
     echo "  + Created $CONFIG_DIR/.env from the template (mode 600)."
     echo "    Edit it and set MEALIE_URL, MEALIE_API_TOKEN and GOOGLE_AI_API_KEY."
 else
-    # Repair over-broad permissions left by an earlier install.
-    chmod 600 "$CONFIG_DIR/.env" 2>/dev/null || true
-    echo "  = $CONFIG_DIR/.env already exists — left as-is (permissions ensured 600)."
+    # Repair over-broad permissions left by an earlier install. A live token +
+    # API key lives here, so a failure to tighten must be surfaced, not swallowed
+    # with `|| true` and then falsely reported as ensured (#200).
+    if chmod 600 "$CONFIG_DIR/.env" 2>/dev/null; then
+        echo "  = $CONFIG_DIR/.env already exists — left as-is (permissions set to 600)."
+    else
+        echo "  = $CONFIG_DIR/.env already exists — left as-is."
+        echo "  ! Warning: could not set mode 0600 on $CONFIG_DIR/.env — it may be readable by other users; fix it manually." >&2
+    fi
 fi
 
 # 3. Remind about PATH: uv installs the command shims into its tool bin dir,

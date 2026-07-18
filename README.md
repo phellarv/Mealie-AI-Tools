@@ -27,6 +27,26 @@ allergens and food-safety steps — before cooking or sharing it. Use at your ow
 risk. Each generated recipe carries a short AI-generated notice in its
 description, and the tools show the same reminder when generating.
 
+### Data sent to Google
+
+These tools work by sending content to a third-party AI. Your prompts — the free
+text, cuisine, ingredients and servings you pass in, and, for the `adapt` /
+`remix` / `translate` / `retag` / `describe` / `complete` / `fill-images` modes,
+the content of the existing Mealie recipe being transformed or cleaned up — are
+transmitted to **Google's Gemini API**, which returns the generated recipe text
+and food photos. Anything you feed these tools therefore leaves your machine.
+
+The generated output, and your use of the API, are subject to Google's terms:
+
+- [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms)
+- [Generative AI Prohibited Use Policy](https://policies.google.com/terms/generative-ai/use-policy)
+
+Depending on your API tier and account settings, Google may retain prompts and
+responses and use them to improve its services — review Google's terms and your
+API settings before sending anything you consider sensitive. This project does
+not send your content anywhere other than the Mealie instance you configure and
+Google's Gemini API.
+
 ## Prerequisites
 
 - **[uv](https://docs.astral.sh/uv/)** — installs and runs the tools. uv fetches
@@ -152,8 +172,9 @@ creates new ones. It refuses to upload if a recipe with the same name already
 exists. All of these interactive picks (category, cuisine, tools) are skipped
 under `--yes`. After a successful upload it also offers (best-effort, skipped
 under `--yes`) to add ingredients from the created recipe to a chosen Mealie
-shopping list — opt-in, nothing selected by default, with a list named like
-the active language's default (`Handleliste` / `Shopping list`) preselected
+shopping list — opt-in, nothing selected by default, with a list whose name
+matches one of the recognized defaults (`Handleliste`, `Shopping list`, or
+`Shoppinglist`, matched case-insensitively in either language) preselected
 when it exists. This same publish pipeline (organizer picks, tool attach,
 shopping-list offer) is shared with the `adapt`/`remix`/`translate`
 subcommands of `mealie-tool` (see below); `mealie-tui` implements the
@@ -214,16 +235,26 @@ per run. Each subcommand has its own `--help` (e.g. `mealie-tool retag
 mealie-tool search "taco soup"
 ```
 
-### Options
+### Subcommands
 
-| Flag               | Description                                                            |
-|---------------------|------------------------------------------------------------------------|
+| Subcommand         | Description                                                            |
+|--------------------|------------------------------------------------------------------------|
 | `search QUERY`     | Search recipes, show matches with links, and optionally add a match's ingredients to a shopping list |
 | `adapt SLUG`       | Adapt an existing Mealie recipe (by slug) to a diet, building a new recipe via the publish pipeline; requires `--diet` |
-| `--diet`           | The diet/constraint for `adapt`, e.g. `vegan`, `gluten-free`, `nut-free` |
 | `remix SLUG`       | Create a new dish from the leftovers of an existing Mealie recipe (by slug), building a new recipe via the publish pipeline |
-| `--into`           | Optional target hint for `remix`, e.g. `soup`                          |
 | `translate SLUG`   | Translate an existing Mealie recipe (by slug) into the active `--lang`, building a new recipe via the publish pipeline; requires an explicit `--lang`/`MEALIE_LANG` |
+
+`search` takes only the common flags below (plus its `QUERY`); it does **not**
+accept the publish flags. The transform modes `adapt` / `remix` / `translate`
+add the transform options below. The maintenance modes have their own
+[Maintenance options](#maintenance-options) table.
+
+#### Transform options (`adapt` / `remix` / `translate` only)
+
+| Flag               | Description                                                            |
+|--------------------|------------------------------------------------------------------------|
+| `--diet`           | The diet/constraint for `adapt`, e.g. `vegan`, `gluten-free`, `nut-free` |
+| `--into`           | Optional target hint for `remix`, e.g. `soup`                          |
 | `--name`           | Force a specific recipe name for the new (adapted/remixed/translated) recipe |
 | `--model`          | Gemini text model (default `gemini-2.5-flash`; or `GEMINI_TEXT_MODEL`) |
 | `--aspect`         | Image aspect ratio (default `4:3`)                                     |
@@ -231,10 +262,15 @@ mealie-tool search "taco soup"
 | `--output-dir`     | Where to write files (default: cwd)                                    |
 | `--force`          | Overwrite a pre-existing local `<slug>.json` and upload even if a recipe with the same name already exists |
 | `--keep-files`     | Keep the cached `<slug>.json` and image after upload (default: remove) |
-| `--lang`           | UI language, e.g. `no`, `en` (overrides `MEALIE_LANG`); the explicit target language required by `translate` |
-| `--env-file`       | Path to the `.env` with credentials (overrides the config dir / `./.env`) |
 | `--dry-run`        | Generate and save the JSON only; don't touch Mealie or generate images |
 | `--yes` / `-y`     | Skip the upload confirmation prompt                                    |
+
+#### Common options (every subcommand)
+
+| Flag               | Description                                                            |
+|--------------------|------------------------------------------------------------------------|
+| `--lang`           | UI language, e.g. `no`, `en` (overrides `MEALIE_LANG`); the explicit target language required by `translate` |
+| `--env-file`       | Path to the `.env` with credentials (overrides the config dir / `./.env`) |
 | `--debug`          | Append verbose error detail (cause, URL, status, response body) to error messages; overrides `MEALIE_DEBUG` |
 
 ### Search recipes
@@ -440,8 +476,9 @@ The preview screen also has a shopping-ingredient checklist and a Mealie
 shopping-list dropdown (#14): nothing is ticked by default, so tick exactly
 which ingredients you want and pick a list, and once the upload succeeds those
 ingredients are added to it (best-effort, logged alongside the publish steps).
-A list named like the active language's default (`Handleliste` / `Shopping
-list`) is preselected when it exists; leave the list dropdown on "don't add to
+A list whose name matches one of the recognized defaults (`Handleliste`,
+`Shopping list`, or `Shoppinglist`) is preselected when it exists; leave the
+list dropdown on "don't add to
 a shopping list" to skip it entirely. Separately, pressing
 `s` on the form screen opens a search screen (#13) that queries Mealie's
 recipes and lists the matches together with their Mealie links; picking a

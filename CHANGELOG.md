@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-18
+
+A large hardening, correctness and maintainability release covering the
+security, correctness, reliability, testing, packaging, CI/CD, UX/i18n,
+documentation, legal and portability findings from a full QA sweep. No new
+commands; behaviour is unchanged except the two items under **Changed**.
+
+### Security
+- Sanitize the Mealie slug before using it as a local image-file path, so a
+  crafted slug (e.g. `../../evil`) cannot write outside the output dir (#154).
+- Percent-encode the slug/tag_id interpolated into Mealie API URL paths, so a
+  value with `/`, `..`, `?` or `#` cannot alter the request path or inject
+  query parameters (#163).
+- Fence untrusted source-recipe content fed to Gemini in explicit delimiters
+  with a data-only guard, to blunt prompt injection from web-imported recipes
+  (#167).
+- Redact the resolved `GOOGLE_AI_API_KEY` from any surfaced Gemini
+  SDK/transport exception text (#193).
+- `install.sh` surfaces (rather than silently swallows) a failure to `chmod`
+  the config dir / `.env`, so an over-permissive credentials file is never
+  reported as secured (#200).
+- Keep the full Mealie HTTP response body out of the default error message; it
+  is retained for `--debug` only (#208).
+- CI verifies the gitleaks binary against its published checksum (#243) and
+  scans the full git history, not just the working tree (#248).
+
+### Added
+- `describe` embeds a persistent AI-generated marker in the descriptions it
+  writes, and preserves an existing embedded AI/allergen disclaimer when it
+  re-describes a recipe (#181, #190).
+- `remix` output carries a leftovers food-safety caveat, mirroring `adapt`'s
+  allergen caveat (#202).
+- Retry with backoff on transient failures: Gemini text generation (#176),
+  idempotent Mealie reads across all modes (#180), and mid-response transport
+  drops (#237).
+- The TUI form autofocuses and submits on Enter, and the cooking-view
+  navigation keys are shown in the footer (#261, #269, #242).
+- A `NOTICE` file attributing bundled third-party dependencies, shipped in the
+  wheel and sdist (#197); the README notes recipe content is sent to Google's
+  Gemini API under its terms (#207).
+- Cross-distro CI: an Alpine/busybox smoke test of `install.sh` (#215).
+
+### Changed
+- **`search` and `audit` no longer accept `--yes` / `--dry-run`.** They were
+  silently ignored before; they are now rejected as unknown arguments. Those
+  flags never did anything for those subcommands, but a script passing them
+  will now error (#257).
+- `mealie-tui --help` now prints help and exits instead of launching the UI
+  (#250).
+- `complete` fills each blank prep/cook/total time field independently instead
+  of all-or-nothing, and clamps negative estimates (#244, #240).
+- `translate` refuses a `--lang` that resolves to the default language (or is
+  unknown) rather than silently producing a duplicate (#232).
+- CI hardening: pinned uv installer (#254), SHA-pinned `actions/checkout`
+  (#227), `timeout-minutes` on every job (#264), plus serialized concurrency,
+  an idempotent GitHub release, and job-scoped permissions on the
+  release/publish workflows (#234, #236, #229).
+- Packaging: Textual floor raised to `>=8` (#187), PEP 639 SPDX license
+  metadata (#272), an sdist target limited to the shipped allow-list (#194),
+  `.env.example` shipped in the dist (#241), and the Development Status
+  classifier bumped to Beta (#268).
+
+### Fixed
+- `fill-images`: escalate the generated image base so a kept `-ai` image is
+  never overwritten-then-deleted (#238), and remove the generated photo when
+  the upload fails (#222).
+- `merge-tags`: handle summary tags missing `slug` (#230) or `id` (#214), and
+  whitespace-named pairs that were silently dropped (#224).
+- `search`-mode shopping add is best-effort per item and reports partial
+  results instead of aborting mid-loop (#235).
+- Paginate the categories / tools / shopping-lists / search endpoints that
+  could silently truncate on a large instance (#171).
+- Report a Gemini image disk-write failure distinctly from an API failure
+  (#231); the insecure-`http://` warning no longer corrupts the TUI (#225).
+- Documentation and help accuracy: `--output-dir`, `--force`, the README
+  option tables, `.env.example` keys, catalog strings naming removed flags, and
+  RELEASING.md's changelog-link base (#153, #175, #188, #249, #252, #258,
+  #262).
+- i18n/UX polish: consistent quote typography and mode summaries, a localized
+  unknown-language warning, cooking-key footer labels, and clearer help (#247,
+  #251, #255, #260, #265, #267, #270).
+
+### Internal
+- Large deduplication sweep: a shared `curation.py` scaffold for the
+  retag/describe/complete modes, shared `mealie_api` GET/PATCH helpers,
+  `cli_common.resolve_output_dir`, `recipe_core.category_names`, a
+  single-source recipe-field schema, named Gemini temperature constants, and
+  more (28 maintainability issues); `with_retries` moved to `mealie_api`.
+- Portability: `#!/usr/bin/env bash` shebangs (#226), portable script
+  self-location without `readlink -f` (#212), explicit `mktemp` templates
+  (#217), `LC_ALL=C` token validation (#206), stdin-piped curl auth (#210),
+  and portable `python` resolution (#221).
+- Substantial new test coverage: console entry points, the release scripts'
+  `main()`, CI workflow structure, and numerous edge/error paths (#196, #199,
+  #201, #204, #209, #211, #213, #216, #218, #220, #223). The full Python test
+  matrix runs only on `dev`; PRs and release runs run the fast checks
+  (documented in RELEASING.md, #228).
+
 ## [1.1.1] - 2026-07-16
 
 ### Fixed
@@ -164,7 +262,8 @@ code review. No user-facing features added and no breaking changes.
   references regenerated, so the public mirror shows no pre-GitHub history or
   dead compare links.
 
-[Unreleased]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/phellarv/Mealie-AI-Tools/compare/v1.0.0...v1.0.1

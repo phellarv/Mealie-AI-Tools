@@ -7,29 +7,42 @@ from __future__ import annotations
 
 import json
 import re
-import time
 import unicodedata
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Callable
 
 import i18n
-from config import error_detail
-from mealie_api import MealieConnectionError
+from config import message_with_detail
+from gemini import GeneratedRecipe
 
-# Fields the generated recipe should copy from an example, in file order.
-_SUBSET_KEYS = (
-    "name",
-    "description",
-    "recipeCategory",
-    "recipeCuisine",
-    "keywords",
-    "recipeYield",
-    "prepTime",
-    "cookTime",
-    "totalTime",
-    "recipeIngredient",
-    "recipeInstructions",
+# Single source of truth for the recipe field schema (#266): the field list is
+# declared once, by the pydantic model Gemini fills in (gemini.GeneratedRecipe),
+# and every consumer below -- the copy subset, the JSON-LD output and the
+# validator -- derives its field names from it. Adding/renaming/removing a field
+# is therefore a one-line change to the model and cannot silently drop the field
+# from copying, output, or validation. Order follows the model's field order.
+_SUBSET_KEYS = tuple(GeneratedRecipe.model_fields)
+
+# Fields to_jsonld/validate_jsonld treat specially, held apart from the generic
+# loops below: description gets the AI disclaimer appended, recipeInstructions is
+# reshaped into HowToStep dicts, recipeIngredient carries its own "no
+# ingredients" warning, and keywords is optional (never warned on when missing).
+_DESCRIPTION_KEY = "description"
+_INSTRUCTIONS_KEY = "recipeInstructions"
+_INGREDIENTS_KEY = "recipeIngredient"
+_KEYWORDS_KEY = "keywords"
+
+# Fields whose emptiness is a plain "missing field" warning: every schema field
+# except keywords (optional) and the ingredient/instruction lists (their own
+# messages). Derived from _SUBSET_KEYS so a new field is checked automatically.
+_REQUIRED_JSONLD_KEYS = tuple(
+    k for k in _SUBSET_KEYS
+    if k not in (_KEYWORDS_KEY, _INGREDIENTS_KEY, _INSTRUCTIONS_KEY)
 )
+
+# ISO 8601 duration fields, checked for the "PT" prefix (a semantic subset, not
+# derivable from the model).
+_DURATION_KEYS = ("prepTime", "cookTime", "totalTime")
 
 
 def slugify(name: str) -> str:
@@ -83,6 +96,17 @@ def instruction_texts(recipe: dict) -> list[str]:
     return out
 
 
+def category_names(recipe: dict) -> list[str]:
+    """Non-empty category names from a recipe's ``recipeCategory`` list.
+
+    Mealie stores categories as dicts carrying a ``name``; a non-dict entry or
+    one with a blank name is dropped. Mirrors ingredient_texts/instruction_texts:
+    the modes join the result with ``", "`` for a prompt (retag/describe/complete/
+    transform), or test it for emptiness (audit)."""
+    return [c["name"] for c in recipe.get("recipeCategory", [])
+            if isinstance(c, dict) and c.get("name")]
+
+
 def reduce_to_subset(full: dict) -> dict | None:
     """Reduce a full JSON-LD recipe to the model's target subset shape.
 
@@ -127,58 +151,35 @@ def to_jsonld(data: dict) -> dict:
     """
     instructions = [
         {"@type": "HowToStep", "name": step.get("name", ""), "text": step.get("text", "")}
-        for step in data["recipeInstructions"]
+        for step in data[_INSTRUCTIONS_KEY]
     ]
     # Embed an AI-generated disclaimer in the description so it travels into
     # Mealie with the recipe (#31). Kept in the recipe's language via i18n.
-    description = f"{data['description']}\n\n{i18n.t('disclaimer.ai_recipe')}".strip()
-    return {
-        "@context": "https://schema.org",
-        "@type": "Recipe",
-        "name": data["name"],
-        "description": description,
-        "recipeCategory": data["recipeCategory"],
-        "recipeCuisine": data["recipeCuisine"],
-        "keywords": data["keywords"],
-        "recipeYield": data["recipeYield"],
-        "prepTime": data["prepTime"],
-        "cookTime": data["cookTime"],
-        "totalTime": data["totalTime"],
-        "recipeIngredient": data["recipeIngredient"],
-        "recipeInstructions": instructions,
-    }
+    description = f"{data[_DESCRIPTION_KEY]}\n\n{i18n.t('disclaimer.ai_recipe')}".strip()
+    special = {_DESCRIPTION_KEY: description, _INSTRUCTIONS_KEY: instructions}
+    jsonld = {"@context": "https://schema.org", "@type": "Recipe"}
+    # Emit the schema fields in model order; only description and instructions
+    # are transformed, the rest are copied straight through (#266).
+    for key in _SUBSET_KEYS:
+        jsonld[key] = special[key] if key in special else data[key]
+    return jsonld
 
 
 def validate_jsonld(recipe: dict) -> list[str]:
     """Return a list of human-readable warnings (empty means it looks good)."""
     warnings: list[str] = []
-    for key in (
-        "name", "description", "recipeCategory", "recipeCuisine",
-        "recipeYield", "prepTime", "cookTime", "totalTime",
-    ):
+    for key in _REQUIRED_JSONLD_KEYS:
         if not recipe.get(key):
             warnings.append(f"missing field: {key}")
-    if not recipe.get("recipeIngredient"):
+    if not recipe.get(_INGREDIENTS_KEY):
         warnings.append("no ingredients")
-    if not recipe.get("recipeInstructions"):
+    if not recipe.get(_INSTRUCTIONS_KEY):
         warnings.append("no instructions")
-    for key in ("prepTime", "cookTime", "totalTime"):
+    for key in _DURATION_KEYS:
         value = recipe.get(key, "")
         if value and not str(value).startswith("PT"):
             warnings.append(f"{key} is not an ISO 8601 duration (got {value!r})")
     return warnings
-
-
-def _prescan_flag(argv: list[str], flag: str) -> str | None:
-    """Find a ``--flag`` value in argv before argparse runs, so import-time setup
-    (language, env-file) can honour it. Supports "--flag x" and "--flag=x"."""
-    prefix = f"{flag}="
-    for i, arg in enumerate(argv):
-        if arg == flag and i + 1 < len(argv):
-            return argv[i + 1]
-        if arg.startswith(prefix):
-            return arg[len(prefix):]
-    return None
 
 
 def _chunks(items: list, size: int) -> list:
@@ -235,29 +236,6 @@ def _cleanup_files(paths: list[Path | None],
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
-            on_line(i18n.t("cleanup.warn", path=path, error=exc) + error_detail(exc))
+            on_line(message_with_detail("cleanup.warn", exc, path=path))
         else:
             on_line(i18n.t("cleanup.removed", path=path))
-
-
-RETRY_ATTEMPTS = 3          # total attempts for a transient-network-safe call
-RETRY_BASE_DELAY = 1.0      # seconds; exponential backoff between attempts
-
-_T = TypeVar("_T")
-
-
-def with_retries(operation: Callable[[], _T]) -> _T:
-    """Call ``operation`` with a bounded exponential backoff, retrying transient
-    connection errors/timeouts (never an application error such as a Mealie
-    non-2xx (MealieResponseError)). Use ONLY for IDEMPOTENT operations (e.g. the image
-    PUT): a read timeout can be raised after the server already processed the
-    request, so the non-idempotent recipe create is deliberately NOT wrapped --
-    retrying it could create a duplicate recipe (#39)."""
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        try:
-            return operation()
-        except MealieConnectionError:
-            if attempt == RETRY_ATTEMPTS:
-                raise
-            time.sleep(RETRY_BASE_DELAY * (2 ** (attempt - 1)))
-    raise AssertionError("with_retries: unreachable")  # loop returns or re-raises
